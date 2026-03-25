@@ -1,0 +1,760 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Agent Vibes · Admin</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              red: '#F24E1E',
+              orange: '#FF7262',
+              purple: '#A259FF',
+              blue: '#1ABCFE',
+              green: '#0ACF83',
+            },
+            surface: {
+              0: '#0a0a0f',
+              1: '#12121a',
+              2: '#1a1a25',
+              3: '#222230',
+              4: '#2a2a3a',
+            }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    [x-cloak] { display: none !important; }
+    body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif; }
+    .scrollbar-thin::-webkit-scrollbar { width: 6px; height: 6px; }
+    .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
+    .scrollbar-thin::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+    .scrollbar-thin::-webkit-scrollbar-thumb:hover { background: #555; }
+    @keyframes pulse-dot { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+    .pulse-dot { animation: pulse-dot 2s ease-in-out infinite; }
+    @keyframes fade-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+    .fade-in { animation: fade-in 0.3s ease-out; }
+    .toast-enter { animation: fade-in 0.3s ease-out; }
+    /* Token masking */
+    .token-mask { filter: blur(4px); transition: filter 0.2s; cursor: pointer; }
+    .token-mask:hover, .token-mask.revealed { filter: none; }
+  </style>
+</head>
+<body class="bg-surface-0 text-gray-200 min-h-screen" x-data="app()" x-init="init()">
+
+  <!-- Toast -->
+  <div class="fixed top-4 right-4 z-50 space-y-2" x-show="toast.show" x-cloak>
+    <div class="toast-enter px-4 py-3 rounded-lg shadow-lg text-sm font-medium max-w-sm"
+         :class="toast.type === 'error' ? 'bg-red-900/90 text-red-200 border border-red-700' : 'bg-green-900/90 text-green-200 border border-green-700'"
+         x-text="toast.message"
+         x-transition:leave="transition ease-in duration-200"
+         x-transition:leave-start="opacity-100" x-transition:leave-end="opacity-0">
+    </div>
+  </div>
+
+  <!-- Layout -->
+  <div class="flex min-h-screen">
+    <!-- Sidebar -->
+    <aside class="w-56 bg-surface-1 border-r border-white/5 flex flex-col fixed h-full z-40">
+      <!-- Logo -->
+      <div class="p-4 border-b border-white/5">
+        <div class="flex items-center gap-2">
+          <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-brand-red to-brand-orange flex items-center justify-center">
+            <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
+            </svg>
+          </div>
+          <div>
+            <div class="text-sm font-bold text-white">Agent Vibes</div>
+            <div class="text-[10px] text-gray-500 uppercase tracking-wider">Admin Panel</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Nav -->
+      <nav class="flex-1 p-3 space-y-1">
+        <template x-for="item in navItems" :key="item.id">
+          <button @click="currentPage = item.id"
+                  class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-all duration-150"
+                  :class="currentPage === item.id
+                    ? 'bg-brand-blue/10 text-brand-blue font-medium'
+                    : 'text-gray-400 hover:text-gray-200 hover:bg-white/5'">
+            <span x-html="item.icon" class="w-5 h-5 flex-shrink-0"></span>
+            <span x-text="item.label"></span>
+            <span x-show="item.id === 'workers' && poolStatus"
+                  class="ml-auto text-[10px] font-mono px-1.5 py-0.5 rounded-full"
+                  :class="poolStatus.available > 0 ? 'bg-green-900/50 text-green-400' : 'bg-red-900/50 text-red-400'"
+                  x-text="poolStatus.available + '/' + poolStatus.total">
+            </span>
+          </button>
+        </template>
+      </nav>
+
+      <!-- Footer -->
+      <div class="p-3 border-t border-white/5">
+        <div class="text-[10px] text-gray-600 text-center">
+          <span x-text="systemInfo?.nodeVersion || ''"></span> ·
+          uptime <span x-text="systemInfo?.uptime?.human || '—'"></span>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main -->
+    <main class="flex-1 ml-56">
+      <!-- Header -->
+      <header class="sticky top-0 z-30 bg-surface-0/80 backdrop-blur-xl border-b border-white/5 px-6 py-3">
+        <div class="flex items-center justify-between">
+          <h1 class="text-lg font-semibold text-white" x-text="navItems.find(i => i.id === currentPage)?.label || 'Dashboard'"></h1>
+          <div class="flex items-center gap-3">
+            <div class="flex items-center gap-2 text-xs text-gray-500">
+              <div class="w-2 h-2 rounded-full pulse-dot"
+                   :class="poolStatus?.available > 0 ? 'bg-green-400' : 'bg-red-400'"></div>
+              <span x-text="poolStatus?.available > 0 ? 'Online' : 'Offline'"></span>
+            </div>
+            <button @click="refreshAll()" class="p-2 rounded-lg hover:bg-white/5 text-gray-400 hover:text-white transition-colors" title="Refresh">
+              <svg class="w-4 h-4" :class="loading && 'animate-spin'" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <div class="p-6">
+        <!-- Dashboard -->
+        <div x-show="currentPage === 'dashboard'" x-cloak class="fade-in space-y-6">
+          <!-- Stats -->
+          <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+            <div class="bg-surface-1 rounded-xl border border-white/5 p-4">
+              <div class="text-xs text-gray-500 uppercase tracking-wider mb-1">Workers</div>
+              <div class="text-2xl font-bold text-white" x-text="poolStatus?.total || 0"></div>
+              <div class="text-xs mt-1" :class="poolStatus?.available > 0 ? 'text-green-400' : 'text-red-400'"
+                   x-text="(poolStatus?.available || 0) + ' available'"></div>
+            </div>
+            <div class="bg-surface-1 rounded-xl border border-white/5 p-4">
+              <div class="text-xs text-gray-500 uppercase tracking-wider mb-1">Accounts</div>
+              <div class="text-2xl font-bold text-white" x-text="accounts.length"></div>
+              <div class="text-xs text-gray-500 mt-1">configured</div>
+            </div>
+            <div class="bg-surface-1 rounded-xl border border-white/5 p-4">
+              <div class="text-xs text-gray-500 uppercase tracking-wider mb-1">Requests</div>
+              <div class="text-2xl font-bold text-white" x-text="requestLogs.length"></div>
+              <div class="text-xs text-gray-500 mt-1">recent</div>
+            </div>
+            <div class="bg-surface-1 rounded-xl border border-white/5 p-4">
+              <div class="text-xs text-gray-500 uppercase tracking-wider mb-1">Memory</div>
+              <div class="text-2xl font-bold text-white" x-text="systemInfo?.memory?.rss || '—'"></div>
+              <div class="text-xs text-gray-500 mt-1">RSS</div>
+            </div>
+          </div>
+
+          <!-- Worker Quick Status -->
+          <div class="bg-surface-1 rounded-xl border border-white/5 p-5">
+            <h3 class="text-sm font-semibold text-white mb-4">Worker Pool</h3>
+            <div class="space-y-2">
+              <template x-for="w in (poolStatus?.workers || [])" :key="w.email">
+                <div class="flex items-center gap-3 bg-surface-2 rounded-lg px-4 py-3">
+                  <div class="w-2 h-2 rounded-full flex-shrink-0"
+                       :class="w.ready && w.cooldownUntil <= Date.now() ? 'bg-green-400' : w.ready ? 'bg-yellow-400' : 'bg-red-400'"></div>
+                  <span class="text-sm text-gray-300 font-mono flex-1 truncate" x-text="w.email"></span>
+                  <span class="text-xs text-gray-500" x-text="'PID ' + (w.pid || '—')"></span>
+                  <span class="text-xs font-mono px-2 py-0.5 rounded"
+                        :class="w.ready ? 'bg-green-900/30 text-green-400' : 'bg-red-900/30 text-red-400'"
+                        x-text="w.ready ? 'ready' : 'down'"></span>
+                  <span class="text-xs text-gray-500" x-text="w.requestCount + ' reqs'"></span>
+                  <span x-show="w.cooldownUntil > Date.now()" class="text-xs text-yellow-400"
+                        x-text="'⏳ ' + formatCooldown(w.cooldownUntil)"></span>
+                </div>
+              </template>
+              <div x-show="!poolStatus?.workers?.length" class="text-sm text-gray-500 text-center py-4">
+                No workers configured
+              </div>
+            </div>
+          </div>
+
+          <!-- Recent Requests -->
+          <div class="bg-surface-1 rounded-xl border border-white/5 p-5">
+            <h3 class="text-sm font-semibold text-white mb-4">Recent Requests</h3>
+            <div class="overflow-x-auto scrollbar-thin">
+              <table class="w-full text-sm">
+                <thead>
+                  <tr class="text-xs text-gray-500 uppercase tracking-wider border-b border-white/5">
+                    <th class="text-left pb-2 pr-4">Time</th>
+                    <th class="text-left pb-2 pr-4">Method</th>
+                    <th class="text-left pb-2 pr-4">URL</th>
+                    <th class="text-left pb-2 pr-4">Status</th>
+                    <th class="text-right pb-2">Duration</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <template x-for="log in requestLogs.slice(0, 10)" :key="log.timestamp">
+                    <tr class="border-b border-white/[0.03] hover:bg-white/[0.02]">
+                      <td class="py-2 pr-4 text-gray-500 font-mono text-xs" x-text="formatTime(log.timestamp)"></td>
+                      <td class="py-2 pr-4">
+                        <span class="px-1.5 py-0.5 rounded text-[10px] font-bold uppercase"
+                              :class="log.method === 'POST' ? 'bg-purple-900/40 text-purple-300' : 'bg-blue-900/40 text-blue-300'"
+                              x-text="log.method"></span>
+                      </td>
+                      <td class="py-2 pr-4 font-mono text-xs text-gray-300 truncate max-w-[300px]" x-text="log.url"></td>
+                      <td class="py-2 pr-4">
+                        <span class="font-mono text-xs"
+                              :class="log.status < 300 ? 'text-green-400' : log.status < 500 ? 'text-yellow-400' : 'text-red-400'"
+                              x-text="log.status"></span>
+                      </td>
+                      <td class="py-2 text-right text-xs text-gray-500" x-text="log.duration + 'ms'"></td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+              <div x-show="requestLogs.length === 0" class="text-sm text-gray-500 text-center py-4">
+                No requests yet
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Workers Page -->
+        <div x-show="currentPage === 'workers'" x-cloak class="fade-in space-y-6">
+          <div class="flex items-center justify-between mb-2">
+            <div class="text-sm text-gray-400">
+              <span x-text="poolStatus?.available || 0" class="text-green-400 font-bold"></span> available /
+              <span x-text="poolStatus?.ready || 0"></span> ready /
+              <span x-text="poolStatus?.total || 0"></span> total
+            </div>
+            <button @click="fetchPoolStatus()" class="text-xs text-brand-blue hover:underline">Refresh</button>
+          </div>
+
+          <div class="space-y-3">
+            <template x-for="w in (poolStatus?.workers || [])" :key="w.email">
+              <div class="bg-surface-1 rounded-xl border border-white/5 p-5">
+                <div class="flex items-center gap-4">
+                  <div class="w-10 h-10 rounded-full flex items-center justify-center"
+                       :class="w.ready && w.cooldownUntil <= Date.now() ? 'bg-green-900/30' : w.ready ? 'bg-yellow-900/30' : 'bg-red-900/30'">
+                    <div class="w-3 h-3 rounded-full"
+                         :class="w.ready && w.cooldownUntil <= Date.now() ? 'bg-green-400' : w.ready ? 'bg-yellow-400' : 'bg-red-400'"></div>
+                  </div>
+                  <div class="flex-1 min-w-0">
+                    <div class="font-mono text-sm text-white truncate" x-text="w.email"></div>
+                    <div class="text-xs text-gray-500 mt-0.5">
+                      PID <span x-text="w.pid || '—'" class="font-mono"></span> ·
+                      <span x-text="w.requestCount"></span> requests served
+                    </div>
+                  </div>
+                  <div class="text-right">
+                    <div class="text-xs font-medium px-2.5 py-1 rounded-full"
+                         :class="w.ready && w.cooldownUntil <= Date.now() ? 'bg-green-900/30 text-green-400 border border-green-800' :
+                                  w.ready ? 'bg-yellow-900/30 text-yellow-400 border border-yellow-800' :
+                                  'bg-red-900/30 text-red-400 border border-red-800'"
+                         x-text="w.ready && w.cooldownUntil <= Date.now() ? 'Available' : w.ready ? 'Cooldown' : 'Down'"></div>
+                    <div x-show="w.cooldownUntil > Date.now()" class="text-[10px] text-yellow-400 mt-1"
+                         x-text="'Expires: ' + formatCooldown(w.cooldownUntil)"></div>
+                  </div>
+                </div>
+              </div>
+            </template>
+          </div>
+
+          <div x-show="!poolStatus?.workers?.length" class="bg-surface-1 rounded-xl border border-white/5 p-8 text-center">
+            <div class="text-gray-500">No workers in the pool</div>
+            <div class="text-xs text-gray-600 mt-2">Add accounts and restart the service</div>
+          </div>
+        </div>
+
+        <!-- Accounts Page -->
+        <div x-show="currentPage === 'accounts'" x-cloak class="fade-in space-y-6">
+          <!-- Actions Bar -->
+          <div class="flex items-center gap-3 flex-wrap">
+            <button @click="showAddAccount = true"
+                    class="px-4 py-2 bg-brand-blue/20 text-brand-blue rounded-lg text-sm font-medium hover:bg-brand-blue/30 transition-colors border border-brand-blue/20">
+              + Add Account
+            </button>
+            <label class="px-4 py-2 bg-surface-2 text-gray-300 rounded-lg text-sm font-medium hover:bg-surface-3 transition-colors cursor-pointer border border-white/5">
+              Import JSON
+              <input type="file" accept=".json" class="hidden" @change="importAccounts($event)">
+            </label>
+            <button @click="exportAccounts()"
+                    class="px-4 py-2 bg-surface-2 text-gray-300 rounded-lg text-sm font-medium hover:bg-surface-3 transition-colors border border-white/5">
+              Export
+            </button>
+            <div class="flex-1"></div>
+            <div class="text-xs text-gray-500">
+              <span x-text="accounts.length"></span> account(s) · <span class="text-yellow-400">⚠ Restart required after changes</span>
+            </div>
+          </div>
+
+          <!-- Account List -->
+          <div class="space-y-2">
+            <template x-for="(acc, idx) in accounts" :key="acc.email">
+              <div class="bg-surface-1 rounded-xl border border-white/5 p-4 group">
+                <div class="flex items-center gap-4">
+                  <div class="w-8 h-8 rounded-full bg-surface-3 flex items-center justify-center text-xs font-bold text-gray-400"
+                       x-text="(idx + 1)"></div>
+                  <div class="flex-1 min-w-0">
+                    <div class="font-mono text-sm text-white truncate" x-text="acc.email"></div>
+                    <div class="flex items-center gap-3 mt-1 text-xs text-gray-500">
+                      <span>Token: <code class="token-mask" @click="$el.classList.toggle('revealed')"
+                            x-text="acc.accessToken?.substring(0, 20) + '...'"></code></span>
+                      <span x-show="acc.expiresAt" :class="isTokenExpired(acc.expiresAt) ? 'text-red-400' : 'text-green-400'"
+                            x-text="isTokenExpired(acc.expiresAt) ? '✗ Expired' : '✓ Valid'"></span>
+                      <span x-show="acc.expiresAt" class="text-gray-600" x-text="'Exp: ' + formatTime(acc.expiresAt)"></span>
+                    </div>
+                  </div>
+                  <button @click="if(confirm('Delete account ' + acc.email + '?')) deleteAccount(acc.email)"
+                          class="p-2 text-gray-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-all">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
+                    </svg>
+                  </button>
+                </div>
+              </div>
+            </template>
+          </div>
+
+          <div x-show="accounts.length === 0" class="bg-surface-1 rounded-xl border border-white/5 p-8 text-center">
+            <div class="text-gray-500">No accounts configured</div>
+            <div class="text-xs text-gray-600 mt-2">Add accounts or import from JSON file</div>
+          </div>
+
+          <!-- Add Account Modal -->
+          <div x-show="showAddAccount" x-cloak class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+               @click.self="showAddAccount = false" @keydown.escape.window="showAddAccount = false">
+            <div class="bg-surface-2 rounded-2xl border border-white/10 w-full max-w-md p-6 shadow-2xl fade-in">
+              <h3 class="text-base font-semibold text-white mb-4">Add Account</h3>
+              <div class="space-y-3">
+                <div>
+                  <label class="text-xs text-gray-400 block mb-1">Email *</label>
+                  <input type="email" x-model="newAccount.email" placeholder="user@example.com"
+                         class="w-full bg-surface-3 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-brand-blue/50">
+                </div>
+                <div>
+                  <label class="text-xs text-gray-400 block mb-1">Access Token *</label>
+                  <textarea x-model="newAccount.accessToken" rows="2" placeholder="ya29...."
+                            class="w-full bg-surface-3 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 font-mono focus:outline-none focus:border-brand-blue/50"></textarea>
+                </div>
+                <div>
+                  <label class="text-xs text-gray-400 block mb-1">Refresh Token *</label>
+                  <textarea x-model="newAccount.refreshToken" rows="2" placeholder="1//..."
+                            class="w-full bg-surface-3 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 font-mono focus:outline-none focus:border-brand-blue/50"></textarea>
+                </div>
+                <div>
+                  <label class="text-xs text-gray-400 block mb-1">Expires At</label>
+                  <input type="text" x-model="newAccount.expiresAt" placeholder="2026-03-27T12:00:00.000Z (optional)"
+                         class="w-full bg-surface-3 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 font-mono focus:outline-none focus:border-brand-blue/50">
+                </div>
+              </div>
+              <div class="flex justify-end gap-3 mt-5">
+                <button @click="showAddAccount = false" class="px-4 py-2 text-sm text-gray-400 hover:text-white transition-colors">Cancel</button>
+                <button @click="addAccount()" :disabled="!newAccount.email || !newAccount.accessToken || !newAccount.refreshToken"
+                        class="px-4 py-2 bg-brand-blue text-white rounded-lg text-sm font-medium hover:bg-brand-blue/80 transition-colors disabled:opacity-30 disabled:cursor-not-allowed">
+                  Add
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Settings Page -->
+        <div x-show="currentPage === 'settings'" x-cloak class="fade-in space-y-6">
+          <div class="bg-surface-1 rounded-xl border border-white/5 p-5">
+            <div class="flex items-center justify-between mb-4">
+              <h3 class="text-sm font-semibold text-white">Environment Configuration</h3>
+              <div class="text-xs text-gray-500" x-text="'File: ' + (settingsFilePath || '.env.local')"></div>
+            </div>
+
+            <div class="space-y-4">
+              <!-- Core -->
+              <div class="border-b border-white/5 pb-4">
+                <div class="text-[10px] text-gray-500 uppercase tracking-wider mb-3">Core</div>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <template x-for="key in ['PORT', 'PROXY_API_KEY', 'USE_HTTP2', 'LOG_DEBUG']" :key="key">
+                    <div>
+                      <label class="text-xs text-gray-400 block mb-1" x-text="key"></label>
+                      <input type="text" :value="settings[key] || ''"
+                             @input="pendingSettings[key] = $event.target.value"
+                             class="w-full bg-surface-3 border border-white/10 rounded-lg px-3 py-2 text-sm text-white font-mono focus:outline-none focus:border-brand-blue/50"
+                             :placeholder="getSettingPlaceholder(key)">
+                    </div>
+                  </template>
+                </div>
+              </div>
+
+              <!-- Antigravity Runtime -->
+              <div class="border-b border-white/5 pb-4">
+                <div class="text-[10px] text-gray-500 uppercase tracking-wider mb-3">Antigravity Runtime</div>
+                <div class="grid grid-cols-1 gap-3">
+                  <template x-for="key in ['ANTIGRAVITY_NODE_BINARY', 'ANTIGRAVITY_NODE_MODULES', 'ANTIGRAVITY_APP_PATH']" :key="key">
+                    <div>
+                      <label class="text-xs text-gray-400 block mb-1" x-text="key"></label>
+                      <input type="text" :value="settings[key] || ''"
+                             @input="pendingSettings[key] = $event.target.value"
+                             class="w-full bg-surface-3 border border-white/10 rounded-lg px-3 py-2 text-sm text-white font-mono focus:outline-none focus:border-brand-blue/50"
+                             :placeholder="getSettingPlaceholder(key)">
+                    </div>
+                  </template>
+                </div>
+              </div>
+
+              <!-- Codex -->
+              <div class="border-b border-white/5 pb-4">
+                <div class="text-[10px] text-gray-500 uppercase tracking-wider mb-3">Codex</div>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <template x-for="key in ['CODEX_API_KEY', 'CODEX_ACCESS_TOKEN', 'CODEX_BASE_URL', 'CODEX_PROXY_URL']" :key="key">
+                    <div>
+                      <label class="text-xs text-gray-400 block mb-1" x-text="key"></label>
+                      <input :type="key.includes('KEY') || key.includes('TOKEN') ? 'password' : 'text'"
+                             :value="settings[key] || ''"
+                             @input="pendingSettings[key] = $event.target.value"
+                             class="w-full bg-surface-3 border border-white/10 rounded-lg px-3 py-2 text-sm text-white font-mono focus:outline-none focus:border-brand-blue/50">
+                    </div>
+                  </template>
+                </div>
+              </div>
+
+              <!-- Cloud Code -->
+              <div>
+                <div class="text-[10px] text-gray-500 uppercase tracking-wider mb-3">Cloud Code</div>
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  <template x-for="key in ['CLOUD_CODE_DEFAULT_OUTPUT_TOKENS', 'CLOUD_CODE_MAX_OUTPUT_TOKENS', 'CLOUD_CODE_MIN_OUTPUT_TOKENS']" :key="key">
+                    <div>
+                      <label class="text-xs text-gray-400 block mb-1" x-text="key.replace('CLOUD_CODE_', '')"></label>
+                      <input type="number" :value="settings[key] || ''"
+                             @input="pendingSettings[key] = $event.target.value"
+                             class="w-full bg-surface-3 border border-white/10 rounded-lg px-3 py-2 text-sm text-white font-mono focus:outline-none focus:border-brand-blue/50">
+                    </div>
+                  </template>
+                </div>
+              </div>
+            </div>
+
+            <div class="mt-5 flex items-center justify-between">
+              <div class="text-xs text-yellow-400">⚠ Changes require service restart to take effect</div>
+              <button @click="saveSettings()"
+                      :disabled="Object.keys(pendingSettings).length === 0"
+                      class="px-4 py-2 bg-brand-green/20 text-brand-green rounded-lg text-sm font-medium hover:bg-brand-green/30 transition-colors border border-brand-green/20 disabled:opacity-30 disabled:cursor-not-allowed">
+                Save Changes
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Logs Page -->
+        <div x-show="currentPage === 'logs'" x-cloak class="fade-in space-y-4">
+          <div class="flex items-center justify-between">
+            <div class="flex items-center gap-3">
+              <select x-model="logFilter" class="bg-surface-2 border border-white/10 rounded-lg px-3 py-1.5 text-sm text-gray-300 focus:outline-none">
+                <option value="all">All</option>
+                <option value="error">Errors (4xx/5xx)</option>
+                <option value="success">Success (2xx)</option>
+              </select>
+              <div class="text-xs text-gray-500">
+                <span x-text="filteredLogs.length"></span> entries
+              </div>
+            </div>
+            <button @click="fetchLogs()" class="text-xs text-brand-blue hover:underline">Refresh</button>
+          </div>
+
+          <div class="bg-surface-1 rounded-xl border border-white/5 overflow-hidden">
+            <div class="overflow-x-auto scrollbar-thin">
+              <table class="w-full text-sm">
+                <thead>
+                  <tr class="text-xs text-gray-500 uppercase tracking-wider bg-surface-2">
+                    <th class="text-left px-4 py-2.5">Time</th>
+                    <th class="text-left px-4 py-2.5">Method</th>
+                    <th class="text-left px-4 py-2.5">URL</th>
+                    <th class="text-left px-4 py-2.5">Status</th>
+                    <th class="text-right px-4 py-2.5">Duration</th>
+                    <th class="text-left px-4 py-2.5">User-Agent</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <template x-for="log in filteredLogs" :key="log.timestamp + log.url">
+                    <tr class="border-t border-white/[0.03] hover:bg-white/[0.02]">
+                      <td class="px-4 py-2.5 text-gray-500 font-mono text-xs whitespace-nowrap" x-text="formatTime(log.timestamp)"></td>
+                      <td class="px-4 py-2.5">
+                        <span class="px-1.5 py-0.5 rounded text-[10px] font-bold uppercase"
+                              :class="log.method === 'POST' ? 'bg-purple-900/40 text-purple-300' : 'bg-blue-900/40 text-blue-300'"
+                              x-text="log.method"></span>
+                      </td>
+                      <td class="px-4 py-2.5 font-mono text-xs text-gray-300 truncate max-w-[400px]" x-text="log.url"></td>
+                      <td class="px-4 py-2.5">
+                        <span class="font-mono text-xs font-medium px-1.5 py-0.5 rounded"
+                              :class="log.status < 300 ? 'bg-green-900/30 text-green-400' : log.status < 500 ? 'bg-yellow-900/30 text-yellow-400' : 'bg-red-900/30 text-red-400'"
+                              x-text="log.status"></span>
+                      </td>
+                      <td class="px-4 py-2.5 text-right text-xs text-gray-500 font-mono" x-text="log.duration + 'ms'"></td>
+                      <td class="px-4 py-2.5 text-xs text-gray-600 truncate max-w-[200px]" x-text="log.userAgent || '—'"></td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+            <div x-show="filteredLogs.length === 0" class="text-sm text-gray-500 text-center py-8">
+              No request logs
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    function app() {
+      return {
+        // Auth
+        apiKey: localStorage.getItem('agent-vibes-api-key') || '',
+        authenticated: false,
+
+        // Navigation
+        currentPage: 'dashboard',
+        navItems: [
+          { id: 'dashboard', label: 'Dashboard', icon: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zm10 0a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zm10 0a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"/></svg>' },
+          { id: 'workers', label: 'Worker Pool', icon: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z"/></svg>' },
+          { id: 'accounts', label: 'Credentials', icon: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"/></svg>' },
+          { id: 'settings', label: 'Settings', icon: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>' },
+          { id: 'logs', label: 'Request Logs', icon: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/></svg>' },
+        ],
+
+        // Data
+        poolStatus: null,
+        accounts: [],
+        accountsFilePath: '',
+        settings: {},
+        settingsFilePath: '',
+        pendingSettings: {},
+        requestLogs: [],
+        systemInfo: null,
+        loading: false,
+        logFilter: 'all',
+
+        // Modals
+        showAddAccount: false,
+        newAccount: { email: '', accessToken: '', refreshToken: '', expiresAt: '' },
+
+        // Toast
+        toast: { show: false, message: '', type: 'success' },
+
+        get filteredLogs() {
+          if (this.logFilter === 'error') return this.requestLogs.filter(l => l.status >= 400)
+          if (this.logFilter === 'success') return this.requestLogs.filter(l => l.status < 300)
+          return this.requestLogs
+        },
+
+        async init() {
+          // Check for stored API key or prompt
+          if (!this.apiKey) {
+            this.apiKey = prompt('Enter PROXY_API_KEY to access admin panel:') || ''
+            if (this.apiKey) localStorage.setItem('agent-vibes-api-key', this.apiKey)
+          }
+          if (!this.apiKey) {
+            document.body.innerHTML = '<div class="flex items-center justify-center min-h-screen text-gray-500">API key required. Reload to try again.</div>'
+            return
+          }
+          await this.refreshAll()
+          // Auto-refresh every 30s
+          setInterval(() => this.fetchPoolStatus(), 30000)
+        },
+
+        async refreshAll() {
+          this.loading = true
+          try {
+            await Promise.all([
+              this.fetchPoolStatus(),
+              this.fetchAccounts(),
+              this.fetchSettings(),
+              this.fetchLogs(),
+              this.fetchSystemInfo(),
+            ])
+          } catch (e) {
+            if (e.message?.includes('401') || e.message?.includes('Unauthorized')) {
+              localStorage.removeItem('agent-vibes-api-key')
+              this.showToast('Invalid API key. Reload to try again.', 'error')
+            }
+          }
+          this.loading = false
+        },
+
+        async api(method, path, body) {
+          const opts = {
+            method,
+            headers: {
+              'x-api-key': this.apiKey,
+              'Content-Type': 'application/json',
+            },
+          }
+          if (body) opts.body = JSON.stringify(body)
+          const baseUrl = window.location.origin
+          const res = await fetch(baseUrl + path, opts)
+          if (!res.ok) {
+            const text = await res.text()
+            throw new Error(`${res.status}: ${text}`)
+          }
+          return res.json()
+        },
+
+        showToast(message, type = 'success') {
+          this.toast = { show: true, message, type }
+          setTimeout(() => this.toast.show = false, 3000)
+        },
+
+        // ── Fetch data ────────────────────────────────────────────
+        async fetchPoolStatus() {
+          try {
+            this.poolStatus = await this.api('GET', '/pool/status')
+          } catch (e) { console.error('fetchPoolStatus:', e) }
+        },
+
+        async fetchAccounts() {
+          try {
+            const data = await this.api('GET', '/admin/accounts')
+            this.accounts = data.accounts || []
+            this.accountsFilePath = data.filePath || ''
+          } catch (e) { console.error('fetchAccounts:', e) }
+        },
+
+        async fetchSettings() {
+          try {
+            const data = await this.api('GET', '/admin/settings')
+            this.settings = data.settings || {}
+            this.settingsFilePath = data.filePath || ''
+            this.pendingSettings = {}
+          } catch (e) { console.error('fetchSettings:', e) }
+        },
+
+        async fetchLogs() {
+          try {
+            this.requestLogs = await this.api('GET', '/admin/logs?limit=100')
+          } catch (e) { console.error('fetchLogs:', e) }
+        },
+
+        async fetchSystemInfo() {
+          try {
+            this.systemInfo = await this.api('GET', '/admin/system')
+          } catch (e) { console.error('fetchSystemInfo:', e) }
+        },
+
+        // ── Account actions ───────────────────────────────────────
+        async addAccount() {
+          try {
+            const acc = { ...this.newAccount }
+            if (!acc.expiresAt) delete acc.expiresAt
+            const result = await this.api('POST', '/admin/accounts', acc)
+            this.showToast(result.message)
+            this.showAddAccount = false
+            this.newAccount = { email: '', accessToken: '', refreshToken: '', expiresAt: '' }
+            await this.fetchAccounts()
+          } catch (e) {
+            this.showToast(e.message, 'error')
+          }
+        },
+
+        async deleteAccount(email) {
+          try {
+            const result = await this.api('DELETE', '/admin/accounts/' + encodeURIComponent(email))
+            this.showToast(result.message)
+            await this.fetchAccounts()
+          } catch (e) {
+            this.showToast(e.message, 'error')
+          }
+        },
+
+        async importAccounts(event) {
+          const file = event.target.files[0]
+          if (!file) return
+          try {
+            const text = await file.text()
+            const data = JSON.parse(text)
+            const accounts = data.accounts || (Array.isArray(data) ? data : [data])
+            const result = await this.api('POST', '/admin/accounts/import', { accounts })
+            this.showToast(result.message)
+            await this.fetchAccounts()
+          } catch (e) {
+            this.showToast('Import failed: ' + e.message, 'error')
+          }
+          event.target.value = ''
+        },
+
+        async exportAccounts() {
+          try {
+            const data = await this.api('GET', '/admin/accounts/export')
+            const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
+            const url = URL.createObjectURL(blob)
+            const a = document.createElement('a')
+            a.href = url
+            a.download = 'accounts.json'
+            a.click()
+            URL.revokeObjectURL(url)
+            this.showToast('Exported ' + (data.accounts?.length || 0) + ' accounts')
+          } catch (e) {
+            this.showToast(e.message, 'error')
+          }
+        },
+
+        // ── Settings ──────────────────────────────────────────────
+        async saveSettings() {
+          const updates = {}
+          for (const [key, value] of Object.entries(this.pendingSettings)) {
+            if (value !== this.settings[key]) {
+              updates[key] = value
+            }
+          }
+          if (Object.keys(updates).length === 0) {
+            this.showToast('No changes to save')
+            return
+          }
+          try {
+            const result = await this.api('PUT', '/admin/settings', updates)
+            this.showToast(result.message)
+            await this.fetchSettings()
+          } catch (e) {
+            this.showToast(e.message, 'error')
+          }
+        },
+
+        getSettingPlaceholder(key) {
+          const defaults = {
+            PORT: '8000',
+            PROXY_API_KEY: 'sk-...',
+            USE_HTTP2: 'true',
+            LOG_DEBUG: 'false',
+            ANTIGRAVITY_NODE_BINARY: '/usr/bin/node',
+            ANTIGRAVITY_NODE_MODULES: '/opt/agent-vibes/node_modules',
+            ANTIGRAVITY_APP_PATH: '/Applications/Antigravity.app',
+          }
+          return defaults[key] || ''
+        },
+
+        // ── Helpers ───────────────────────────────────────────────
+        formatTime(ts) {
+          if (!ts) return '—'
+          try {
+            const d = new Date(ts)
+            return d.toLocaleTimeString('en-US', { hour12: false }) + ' ' +
+                   d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+          } catch { return ts }
+        },
+
+        formatCooldown(until) {
+          const remaining = Math.max(0, until - Date.now())
+          if (remaining <= 0) return 'ready'
+          const mins = Math.floor(remaining / 60000)
+          const secs = Math.floor((remaining % 60000) / 1000)
+          return mins > 0 ? `${mins}m ${secs}s` : `${secs}s`
+        },
+
+        isTokenExpired(expiresAt) {
+          if (!expiresAt) return false
+          return new Date(expiresAt) < new Date()
+        },
+      }
+    }
+  </script>
+</body>
+</html>

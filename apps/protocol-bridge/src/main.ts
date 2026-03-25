@@ -1,4 +1,5 @@
 import fastifyCors from "@fastify/cors"
+import fastifyStatic from "@fastify/static"
 import { BadRequestException, Logger, ValidationPipe } from "@nestjs/common"
 import { NestFactory } from "@nestjs/core"
 import {
@@ -9,6 +10,7 @@ import { DocumentBuilder, SwaggerModule } from "@nestjs/swagger"
 import * as fs from "fs"
 import * as path from "path"
 import { AppModule } from "./app.module"
+import { AdminService } from "./admin/admin.service"
 import { registerContentTypeParsers } from "./shared/content-type-parsers"
 import { registerRequestHooks } from "./shared/request-hooks"
 
@@ -141,6 +143,40 @@ async function bootstrap() {
   // Register request logging hooks
   registerRequestHooks(fastifyInstance, logger)
 
+  // Register static file serving for admin dashboard
+  const adminPublicDir = path.join(__dirname, "..", "public")
+  if (!fs.existsSync(adminPublicDir)) {
+    fs.mkdirSync(adminPublicDir, { recursive: true })
+  }
+  await fastifyInstance.register(fastifyStatic, {
+    root: adminPublicDir,
+    prefix: "/admin/",
+    decorateReply: false,
+  })
+
+  // Register request logging hook for admin dashboard
+  const adminService = app.get(AdminService)
+  fastifyInstance.addHook("onResponse", async (request, reply) => {
+    // Skip admin and docs routes from logging
+    const url = request.url || ""
+    if (
+      url.startsWith("/admin") ||
+      url.startsWith("/docs") ||
+      url === "/health" ||
+      url === "/favicon.ico"
+    ) {
+      return
+    }
+    adminService.addRequestLog({
+      timestamp: new Date().toISOString(),
+      method: request.method,
+      url: request.url,
+      status: reply.statusCode,
+      duration: Math.round(reply.elapsedTime || 0),
+      userAgent: request.headers["user-agent"] as string,
+    })
+  })
+
   // Global validation pipe
   app.useGlobalPipes(
     new ValidationPipe({
@@ -235,6 +271,7 @@ ${c.blue}║${c.reset}${pad("", Math.floor((W - 28) / 2))}${c.bold}${c.blue}⚡ 
 ${sep}
 ${empty}
 ${line(`${c.green}▸${c.reset} Server    ${c.bold}${c.green}${serverUrl}${c.reset}`)}
+${line(`${c.green}▸${c.reset} Admin     ${c.bold}${c.green}${serverUrl}/admin/${c.reset}`)}
 ${line(`${c.green}▸${c.reset} API Docs  ${c.bold}${c.green}${serverUrl}/docs${c.reset}`)}
 ${line(`${c.green}▸${c.reset} HTTP/2    ${c.bold}${c.white}${http2Status}${c.reset}`)}
 ${empty}

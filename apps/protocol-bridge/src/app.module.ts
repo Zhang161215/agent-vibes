@@ -7,6 +7,7 @@ import { CursorModule } from "./protocol/cursor/cursor.module"
 import { HistoryModule } from "./context/history.module"
 import { HealthController } from "./health.controller"
 import { ModelModule } from "./llm/model.module"
+import { AdminModule } from "./admin/admin.module"
 import { validateEnv } from "./shared/env.validation"
 
 const ENV_FILE_CANDIDATES = [
@@ -30,6 +31,7 @@ const ENV_FILE_CANDIDATES = [
     HistoryModule,
     ModelModule,
     NativeModule,
+    AdminModule,
   ],
   controllers: [HealthController],
 })
