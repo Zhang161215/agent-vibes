@@ -21,7 +21,7 @@ export class AdminController {
   constructor(private readonly adminService: AdminService) {}
 
   // =========================================================================
-  // Accounts
+  // Accounts (Antigravity)
   // =========================================================================
 
   @Get("accounts")
@@ -52,6 +52,16 @@ export class AdminController {
   @ApiOperation({ summary: "Export all accounts as JSON" })
   exportAccounts() {
     return this.adminService.getAccounts()
+  }
+
+  // =========================================================================
+  // Codex
+  // =========================================================================
+
+  @Get("codex")
+  @ApiOperation({ summary: "Get Codex backend configuration info" })
+  getCodexInfo() {
+    return this.adminService.getCodexInfo()
   }
 
   // =========================================================================

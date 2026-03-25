@@ -14,6 +14,17 @@ export interface RequestLogEntry {
   error?: string
 }
 
+export interface CodexInfo {
+  available: boolean
+  authMode: "apikey" | "oauth" | "none"
+  hasApiKey: boolean
+  hasAccessToken: boolean
+  baseUrl: string
+  hasProxy: boolean
+  planType: string | null
+  useWebSocket: boolean
+}
+
 @Injectable()
 export class AdminService {
   private readonly logger = new Logger(AdminService.name)
@@ -123,6 +134,50 @@ export class AdminService {
   }
 
   // =========================================================================
+  // Codex credentials info
+  // =========================================================================
+
+  getCodexInfo(): CodexInfo {
+    const apiKey = (
+      this.configService.get<string>("CODEX_API_KEY", "") || ""
+    ).trim()
+    const accessToken = (
+      this.configService.get<string>("CODEX_ACCESS_TOKEN", "") || ""
+    ).trim()
+    const baseUrl = (
+      this.configService.get<string>(
+        "CODEX_BASE_URL",
+        "https://chatgpt.com/backend-api/codex"
+      ) || ""
+    ).trim()
+    const proxyUrl = (
+      this.configService.get<string>("CODEX_PROXY_URL", "") || ""
+    ).trim()
+    const planType = (
+      this.configService.get<string>("CODEX_PLAN_TYPE", "") || ""
+    ).trim()
+    const wsEnv = (
+      this.configService.get<string>("CODEX_USE_WEBSOCKET", "") || ""
+    )
+      .trim()
+      .toLowerCase()
+
+    const hasApiKey = !!apiKey
+    const hasAccessToken = !!accessToken
+
+    return {
+      available: hasApiKey || hasAccessToken,
+      authMode: hasApiKey ? "apikey" : hasAccessToken ? "oauth" : "none",
+      hasApiKey,
+      hasAccessToken,
+      baseUrl,
+      hasProxy: !!proxyUrl,
+      planType: planType || null,
+      useWebSocket: wsEnv === "true" || wsEnv === "1",
+    }
+  }
+
+  // =========================================================================
   // Settings (.env.local)
   // =========================================================================
 
@@ -210,7 +265,7 @@ export class AdminService {
     )
     return {
       success: true,
-      message: `Updated ${Object.keys(updates).length} setting(s). Restart required for changes to take effect.`,
+      message: `已更新 ${Object.keys(updates).length} 项设置，重启服务后生效。`,
     }
   }
 
@@ -260,11 +315,11 @@ export class AdminService {
     const m = Math.floor((seconds % 3600) / 60)
     const s = Math.floor(seconds % 60)
     const parts: string[] = []
-    if (d > 0) parts.push(`${d}d`)
-    if (h > 0) parts.push(`${h}h`)
-    if (m > 0) parts.push(`${m}m`)
-    parts.push(`${s}s`)
-    return parts.join(" ")
+    if (d > 0) parts.push(`${d}天`)
+    if (h > 0) parts.push(`${h}时`)
+    if (m > 0) parts.push(`${m}分`)
+    parts.push(`${s}秒`)
+    return parts.join("")
   }
 
   private formatBytes(bytes: number): string {
