@@ -29,7 +29,9 @@ import { normalizeBugfixResultItems as normalizeBugfixResultItemsFromContract } 
 import {
   ChatSession,
   ChatSessionManager,
+  InterruptedToolCallInfo,
   PendingToolCall,
+  SessionRestartRecovery,
   SessionTodoItem,
   SessionTodoStatus,
   SubAgentContext,
@@ -845,22 +847,135 @@ export class CursorConnectStreamService {
           input: toolInput || {},
         },
       ]
-      session.messages.push({
-        role: "assistant",
-        content: syntheticToolUse,
-      })
+      this.sessionManager.addMessage(
+        session.conversationId,
+        "assistant",
+        syntheticToolUse
+      )
     }
 
-    session.messages.push({
-      role: "user",
-      content: [
-        {
-          type: "tool_result" as const,
-          tool_use_id: toolCallId,
-          content: toolResultContent,
-        },
-      ],
-    })
+    this.sessionManager.addMessage(session.conversationId, "user", [
+      {
+        type: "tool_result" as const,
+        tool_use_id: toolCallId,
+        content: toolResultContent,
+      },
+    ])
+  }
+
+  private extractToolUseBlocks(
+    content: MessageContent | undefined
+  ): ToolUseContentItem[] {
+    if (!Array.isArray(content)) return []
+
+    const toolUses: ToolUseContentItem[] = []
+    for (const block of content) {
+      if (!block || typeof block !== "object") continue
+      if (block.type !== "tool_use") continue
+      if (typeof block.id !== "string" || !block.id) continue
+      toolUses.push({
+        type: "tool_use",
+        id: block.id,
+        name: typeof block.name === "string" ? block.name : "unknown_tool",
+        input:
+          block.input && typeof block.input === "object" && !Array.isArray(block.input)
+            ? (block.input as Record<string, unknown>)
+            : {},
+      })
+    }
+    return toolUses
+  }
+
+  private extractToolResultIds(content: MessageContent | undefined): Set<string> {
+    const ids = new Set<string>()
+    if (!Array.isArray(content)) return ids
+
+    for (const block of content) {
+      if (!block || typeof block !== "object") continue
+      if (block.type !== "tool_result") continue
+      if (typeof block.tool_use_id !== "string" || !block.tool_use_id) continue
+      ids.add(block.tool_use_id)
+    }
+
+    return ids
+  }
+
+  private buildInterruptedToolResultContent(
+    toolCall: InterruptedToolCallInfo
+  ): string {
+    return (
+      `Tool execution aborted because the proxy restarted before the result was received.` +
+      `\nreason: proxy restarted` +
+      `\ntool: ${toolCall.toolName || toolCall.toolCallId}`
+    )
+  }
+
+  private repairInterruptedToolProtocol(
+    session: ChatSession,
+    recovery: SessionRestartRecovery
+  ): void {
+    if (recovery.interruptedToolCalls.length === 0) {
+      return
+    }
+
+    const interruptedById = new Map(
+      recovery.interruptedToolCalls.map((toolCall) => [
+        toolCall.toolCallId,
+        toolCall,
+      ])
+    )
+    const repairedMessages = [...session.messages]
+    let changed = false
+
+    for (let i = 0; i < repairedMessages.length; i++) {
+      const message = repairedMessages[i]
+      if (!message || message.role !== "assistant") continue
+
+      const interruptedToolUses = this.extractToolUseBlocks(message.content).filter(
+        (toolUse) => interruptedById.has(toolUse.id)
+      )
+      if (interruptedToolUses.length === 0) continue
+
+      const syntheticResults: ToolResultContentItem[] = interruptedToolUses.map(
+        (toolUse) => ({
+          type: "tool_result",
+          tool_use_id: toolUse.id,
+          content: this.buildInterruptedToolResultContent(
+            interruptedById.get(toolUse.id)!
+          ),
+        })
+      )
+
+      const nextMessage = repairedMessages[i + 1]
+      if (nextMessage?.role === "user" && Array.isArray(nextMessage.content)) {
+        const existingToolResultIds = this.extractToolResultIds(nextMessage.content)
+        const missingResults = syntheticResults.filter(
+          (toolResult) => !existingToolResultIds.has(toolResult.tool_use_id)
+        )
+        if (missingResults.length === 0) continue
+        repairedMessages[i + 1] = {
+          ...nextMessage,
+          content: [...nextMessage.content, ...missingResults],
+        }
+        changed = true
+        continue
+      }
+
+      repairedMessages.splice(i + 1, 0, {
+        role: "user",
+        content: syntheticResults,
+      })
+      changed = true
+      i++
+    }
+
+    if (!changed) return
+
+    const normalizedMessages = this.normalizeHistoryForBackend(
+      repairedMessages,
+      `restart recovery: ${session.conversationId}`
+    )
+    this.sessionManager.replaceMessages(session.conversationId, normalizedMessages)
   }
 
   private normalizeHistoryForBackend(
@@ -2384,11 +2499,7 @@ export class CursorConnectStreamService {
       try {
         const doc = await this.fetchUrlDocument(url)
         const chunks = this.buildWebDocumentChunks(doc.content)
-        const session = this.sessionManager.getSession(conversationId)
-        if (!session) {
-          throw new Error(`Session not found: ${conversationId}`)
-        }
-        session.webDocuments.set(url, {
+        this.sessionManager.setWebDocument(conversationId, url, {
           url,
           title: doc.title,
           contentType: doc.contentType,
@@ -3140,7 +3251,7 @@ export class CursorConnectStreamService {
       }))
     }
 
-    session.todos = nextTodos
+    this.sessionManager.replaceTodos(session.conversationId, nextTodos)
     const serializedTodos = nextTodos.map((todo) =>
       this.serializeTodoItemForTool(todo)
     )
@@ -5251,7 +5362,7 @@ export class CursorConnectStreamService {
   ): Generator<Buffer> {
     if (this.isEditToolInvocation(toolCall.name)) {
       const typedInput = input as ToolInputWithPath
-      const readExecId = session.execId++
+      const readExecId = this.sessionManager.nextExecId(conversationId)
       const readExecMsg = this.grpcService.createReadExecMessage(
         toolCall.id,
         String(typedInput.path || ""),
@@ -5266,7 +5377,7 @@ export class CursorConnectStreamService {
       return
     }
 
-    const execIdNumber = session.execId++
+    const execIdNumber = this.sessionManager.nextExecId(conversationId)
     const toolCallBuffer = this.grpcService.createAgentToolCallResponse(
       dispatchTarget.toolName,
       toolCall.id,
@@ -5322,8 +5433,8 @@ export class CursorConnectStreamService {
       toolCall.modelCallId
     )
 
-    session.stepId++
-    yield this.grpcService.createStepStartedResponse(session.stepId)
+    const stepId = this.sessionManager.incrementStepId(conversationId)
+    yield this.grpcService.createStepStartedResponse(stepId)
 
     if (this.shouldEmitToolCallStarted(deferredToolFamily, canDispatchExec)) {
       const toolStarted = this.grpcService.createToolCallStartedResponse(
@@ -5742,6 +5853,24 @@ export class CursorConnectStreamService {
           )
           if (
             parsed.isResumeAction &&
+            sessionBeforeRun?.restartRecovery
+          ) {
+            this.logger.warn(
+              `resumeAction hit restored interrupted state for ${conversationId}`
+            )
+            this.repairInterruptedToolProtocol(
+              sessionBeforeRun,
+              sessionBeforeRun.restartRecovery
+            )
+            yield* this.emitAgentFinalTextResponse(
+              sessionBeforeRun,
+              sessionBeforeRun.restartRecovery.notice
+            )
+            this.sessionManager.clearRestartRecovery(conversationId!)
+            return
+          }
+          if (
+            parsed.isResumeAction &&
             sessionBeforeRun &&
             sessionBeforeRun.pendingToolCalls.size > 0
           ) {
@@ -5880,7 +6009,7 @@ export class CursorConnectStreamService {
       `chat pre-truncation: ${conversationId}`
     )
     if (usingSessionHistory) {
-      session.messages = rawMessages
+      this.sessionManager.replaceMessages(conversationId, rawMessages)
     }
 
     // =========================================================================
@@ -6736,7 +6865,10 @@ export class CursorConnectStreamService {
         }>,
         `shell continuation: ${conversationId}`
       )
-      session.messages = normalizedShellHistory
+      this.sessionManager.replaceMessages(
+        conversationId,
+        normalizedShellHistory
+      )
 
       const truncatedShellMessages = this.truncateMessagesForBackend(
         conversationId,
@@ -6849,10 +6981,11 @@ export class CursorConnectStreamService {
         } else if (event.type === "message_stop") {
           // AI finished without more tool calls
           if (accumulatedText) {
-            session.messages.push({
-              role: "assistant",
-              content: accumulatedText,
-            })
+            this.sessionManager.addMessage(
+              session.conversationId,
+              "assistant",
+              accumulatedText
+            )
           }
 
           // Send turn completion messages（与 handleChatMessage 一致：先 checkpoint 再 turnEnded）
@@ -7048,7 +7181,7 @@ export class CursorConnectStreamService {
               `Edit apply warning for ${editPending.toolCallId}: ${computedEdit.warning}`
             )
           }
-          const writeExecId = session.execId++
+          const writeExecId = this.sessionManager.nextExecId(conversationId)
           const writeExecMsg = this.grpcService.createWriteExecMessage(
             editPending.toolCallId,
             String(typedInput.path || ""),
@@ -7585,7 +7718,10 @@ export class CursorConnectStreamService {
       }>,
       `tool continuation: ${conversationId}`
     )
-    session.messages = normalizedContinuationHistory
+    this.sessionManager.replaceMessages(
+      conversationId,
+      normalizedContinuationHistory
+    )
 
     const truncatedContinuationMessages = this.truncateMessagesForBackend(
       conversationId,

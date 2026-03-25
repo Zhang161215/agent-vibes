@@ -1,4 +1,7 @@
-import { Injectable, Logger } from "@nestjs/common"
+import { Injectable, Logger, OnModuleDestroy } from "@nestjs/common"
+import Database from "better-sqlite3"
+import * as fs from "fs"
+import * as path from "path"
 import { ParsedCursorRequest } from "./cursor-request-parser"
 
 /**
@@ -19,6 +22,25 @@ export interface SessionTodoItem {
   createdAt: number
   updatedAt: number
   dependencies: string[]
+}
+
+export interface InterruptedToolCallInfo {
+  toolCallId: string
+  toolName: string
+  sentAt: Date
+}
+
+export interface SessionRestartRecovery {
+  restoredAt: Date
+  notice: string
+  interruptedToolCalls: InterruptedToolCallInfo[]
+  interruptedInteractionQueryCount: number
+  interruptedSubAgent?: {
+    subagentId: string
+    parentToolCallId: string
+    turnCount: number
+    toolCallCount: number
+  }
 }
 
 /**
@@ -92,6 +114,9 @@ export interface ChatSession {
 
   // Sub-agent context (active when a task tool call is running a sub-agent)
   subAgentContext?: SubAgentContext
+
+  // Recovery notice for unrecoverable in-flight state after proxy restart
+  restartRecovery?: SessionRestartRecovery
 }
 
 export interface PendingToolCall {
@@ -171,22 +196,676 @@ export interface SubAgentToolResult {
   resultCase: string
 }
 
+interface PersistedPendingToolCall {
+  toolCallId: string
+  toolName: string
+  toolInput: Record<string, unknown>
+  toolFamilyHint?: "mcp"
+  modelCallId: string
+  startedEmitted: boolean
+  sentAt: number
+  execIds: number[]
+  editApplyWarning?: string
+  beforeContent?: string
+  shellStreamOutput?: {
+    stdout: string[]
+    stderr: string[]
+    exitCode?: number
+    signal?: string
+    started: boolean
+  }
+}
+
+interface PersistedSubAgentContext {
+  parentToolCallId: string
+  parentModelCallId: string
+  subagentId: string
+  messages: Array<{ role: "user" | "assistant"; content: MessageContent }>
+  model: string
+  tools: unknown[]
+  accumulatedText: string
+  pendingToolCallIds: string[]
+  startTime: number
+  turnCount: number
+  toolCallCount: number
+  modifiedFiles: string[]
+  currentTurnToolCalls: Array<{
+    id: string
+    name: string
+    input: Record<string, unknown>
+  }>
+  expectedToolCallIds: string[]
+}
+
+interface PersistedWebDocument {
+  url: string
+  title: string
+  contentType: string
+  chunks: string[]
+  createdAt: number
+}
+
+interface PersistedSessionRestartRecovery {
+  restoredAt: number
+  notice: string
+  interruptedToolCalls: Array<{
+    toolCallId: string
+    toolName: string
+    sentAt: number
+  }>
+  interruptedInteractionQueryCount: number
+  interruptedSubAgent?: {
+    subagentId: string
+    parentToolCallId: string
+    turnCount: number
+    toolCallCount: number
+  }
+}
+
+interface PersistedChatSessionV1 {
+  version: 1
+  conversationId: string
+  messages: Array<{ role: "user" | "assistant"; content: MessageContent }>
+  model: string
+  thinkingLevel: number
+  isAgentic: boolean
+  supportedTools: string[]
+  mcpToolDefs?: ParsedCursorRequest["mcpToolDefs"]
+  useWeb: boolean
+  createdAt: number
+  lastActivityAt: number
+  pendingToolCalls: PersistedPendingToolCall[]
+  pendingInteractionQueryCount: number
+  projectContext?: ParsedCursorRequest["projectContext"]
+  codeChunks?: ParsedCursorRequest["codeChunks"]
+  cursorRules?: string[]
+  explicitContext?: string
+  contextTokenLimit?: number
+  usedContextTokens?: number
+  requestedMaxOutputTokens?: number
+  requestedModelParameters?: Record<string, string>
+  usedTokens: number
+  readPaths: string[]
+  fileStates: Array<{
+    path: string
+    beforeContent: string
+    afterContent: string
+  }>
+  messageBlobIds: string[]
+  turns: string[]
+  currentAssistantMessage?: Record<string, unknown>
+  stepId: number
+  execId: number
+  interactionQueryId: number
+  todos: SessionTodoItem[]
+  webDocuments: PersistedWebDocument[]
+  subAgentContext?: PersistedSubAgentContext
+  restartRecovery?: PersistedSessionRestartRecovery
+}
+
 @Injectable()
-export class ChatSessionManager {
+export class ChatSessionManager implements OnModuleDestroy {
   private readonly logger = new Logger(ChatSessionManager.name)
   private readonly sessions = new Map<string, ChatSession>()
   private readonly SESSION_TIMEOUT = 30 * 60 * 1000 // 30 minutes
+  private readonly PERSISTED_SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000
+  private readonly PERSIST_FLUSH_INTERVAL_MS = 15 * 1000
+  private readonly PERSIST_DEBOUNCE_MS = 250
+  private readonly dbPath: string
+  private db: Database.Database | null = null
+  private readonly scheduledPersistTimers = new Map<
+    string,
+    ReturnType<typeof setTimeout>
+  >()
+  private readonly cleanupInterval: ReturnType<typeof setInterval>
+  private readonly persistFlushInterval: ReturnType<typeof setInterval>
 
   constructor() {
-    // Cleanup expired sessions every 5 minutes
-    setInterval(() => this.cleanupExpiredSessions(), 5 * 60 * 1000)
+    const homeDir = process.env.HOME || process.env.USERPROFILE || "/tmp"
+    const dataDir = path.join(homeDir, ".protocol-bridge")
+    if (!fs.existsSync(dataDir)) {
+      fs.mkdirSync(dataDir, { recursive: true })
+    }
+    this.dbPath = path.join(dataDir, "session-state.db")
+    this.initDatabase()
+    this.cleanupOldPersistedSessions()
+
+    this.cleanupInterval = setInterval(
+      () => this.cleanupExpiredSessions(),
+      5 * 60 * 1000
+    )
+    this.persistFlushInterval = setInterval(
+      () => this.persistAllSessions(),
+      this.PERSIST_FLUSH_INTERVAL_MS
+    )
+    this.cleanupInterval.unref?.()
+    this.persistFlushInterval.unref?.()
+  }
+
+  onModuleDestroy(): void {
+    this.persistAllSessions()
+
+    for (const timer of this.scheduledPersistTimers.values()) {
+      clearTimeout(timer)
+    }
+    this.scheduledPersistTimers.clear()
+
+    clearInterval(this.cleanupInterval)
+    clearInterval(this.persistFlushInterval)
+
+    if (this.db) {
+      this.db.close()
+      this.db = null
+    }
+  }
+
+  private initDatabase(): void {
+    try {
+      this.db = new Database(this.dbPath)
+      this.db.pragma("journal_mode = WAL")
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS cursor_sessions (
+          conversation_id TEXT PRIMARY KEY,
+          state_json TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          last_activity_at INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cursor_sessions_last_activity
+          ON cursor_sessions(last_activity_at);
+      `)
+      this.logger.log(`Session persistence initialized at ${this.dbPath}`)
+    } catch (error) {
+      this.logger.error(
+        `Failed to initialize session persistence: ${String(error)}`
+      )
+      this.db = null
+    }
+  }
+
+  private cleanupOldPersistedSessions(): void {
+    if (!this.db) return
+
+    const cutoff = Date.now() - this.PERSISTED_SESSION_TTL_MS
+    try {
+      const result = this.db
+        .prepare(
+          `DELETE FROM cursor_sessions
+           WHERE last_activity_at < ?`
+        )
+        .run(cutoff)
+      if (result.changes > 0) {
+        this.logger.log(
+          `Cleaned up ${result.changes} expired persisted session(s)`
+        )
+      }
+    } catch (error) {
+      this.logger.error(
+        `Failed to cleanup persisted sessions: ${String(error)}`
+      )
+    }
+  }
+
+  private schedulePersist(conversationId: string): void {
+    const existingTimer = this.scheduledPersistTimers.get(conversationId)
+    if (existingTimer) {
+      clearTimeout(existingTimer)
+    }
+
+    const timer = setTimeout(() => {
+      this.scheduledPersistTimers.delete(conversationId)
+      this.persistSession(conversationId)
+    }, this.PERSIST_DEBOUNCE_MS)
+    timer.unref?.()
+    this.scheduledPersistTimers.set(conversationId, timer)
+  }
+
+  private clearScheduledPersist(conversationId: string): void {
+    const timer = this.scheduledPersistTimers.get(conversationId)
+    if (!timer) return
+    clearTimeout(timer)
+    this.scheduledPersistTimers.delete(conversationId)
+  }
+
+  private persistAllSessions(): void {
+    for (const conversationId of this.sessions.keys()) {
+      this.persistSession(conversationId)
+    }
+    this.cleanupOldPersistedSessions()
+  }
+
+  persistSession(conversationId: string): void {
+    if (!this.db) return
+
+    const session = this.sessions.get(conversationId)
+    if (!session) return
+
+    const now = Date.now()
+    const state = this.serializeSession(session)
+
+    try {
+      this.db
+        .prepare(
+          `INSERT INTO cursor_sessions (
+             conversation_id,
+             state_json,
+             created_at,
+             updated_at,
+             last_activity_at
+           ) VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(conversation_id) DO UPDATE SET
+             state_json = excluded.state_json,
+             updated_at = excluded.updated_at,
+             last_activity_at = excluded.last_activity_at`
+        )
+        .run(
+          conversationId,
+          JSON.stringify(state),
+          session.createdAt.getTime(),
+          now,
+          session.lastActivityAt.getTime()
+        )
+    } catch (error) {
+      this.logger.error(
+        `Failed to persist session ${conversationId}: ${String(error)}`
+      )
+    }
+  }
+
+  private loadPersistedSession(conversationId: string): ChatSession | undefined {
+    if (!this.db) return undefined
+
+    try {
+      const row = this.db
+        .prepare(
+          `SELECT state_json, last_activity_at
+           FROM cursor_sessions
+           WHERE conversation_id = ?`
+        )
+        .get(conversationId) as
+        | { state_json: string; last_activity_at: number }
+        | undefined
+
+      if (!row) return undefined
+
+      if (Date.now() - row.last_activity_at > this.PERSISTED_SESSION_TTL_MS) {
+        this.deletePersistedSession(conversationId)
+        return undefined
+      }
+
+      const persisted = JSON.parse(row.state_json) as PersistedChatSessionV1
+      const session = this.deserializeSession(persisted)
+      this.sessions.set(conversationId, session)
+      this.logger.log(
+        `>>> Restored persisted session: ${conversationId} (messages: ${session.messages.length}, turns: ${session.turns.length})`
+      )
+      this.schedulePersist(conversationId)
+      return session
+    } catch (error) {
+      this.logger.error(
+        `Failed to load persisted session ${conversationId}: ${String(error)}`
+      )
+      return undefined
+    }
+  }
+
+  private deletePersistedSession(conversationId: string): void {
+    if (!this.db) return
+    try {
+      this.db
+        .prepare(`DELETE FROM cursor_sessions WHERE conversation_id = ?`)
+        .run(conversationId)
+    } catch (error) {
+      this.logger.error(
+        `Failed to delete persisted session ${conversationId}: ${String(error)}`
+      )
+    }
+  }
+
+  private toTimestamp(
+    value: Date | number | undefined,
+    fallback: number = Date.now()
+  ): number {
+    if (value instanceof Date) {
+      const ms = value.getTime()
+      return Number.isFinite(ms) ? ms : fallback
+    }
+    if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+      return Math.floor(value)
+    }
+    return fallback
+  }
+
+  private serializeSession(session: ChatSession): PersistedChatSessionV1 {
+    return {
+      version: 1,
+      conversationId: session.conversationId,
+      messages: session.messages,
+      model: session.model,
+      thinkingLevel: session.thinkingLevel,
+      isAgentic: session.isAgentic,
+      supportedTools: session.supportedTools,
+      mcpToolDefs: session.mcpToolDefs,
+      useWeb: session.useWeb,
+      createdAt: this.toTimestamp(session.createdAt),
+      lastActivityAt: this.toTimestamp(session.lastActivityAt),
+      pendingToolCalls: Array.from(session.pendingToolCalls.values()).map(
+        (toolCall) => ({
+          toolCallId: toolCall.toolCallId,
+          toolName: toolCall.toolName,
+          toolInput: toolCall.toolInput,
+          toolFamilyHint: toolCall.toolFamilyHint,
+          modelCallId: toolCall.modelCallId,
+          startedEmitted: toolCall.startedEmitted,
+          sentAt: this.toTimestamp(toolCall.sentAt),
+          execIds: Array.from(toolCall.execIds),
+          editApplyWarning: toolCall.editApplyWarning,
+          beforeContent: toolCall.beforeContent,
+          shellStreamOutput: toolCall.shellStreamOutput
+            ? {
+                stdout: [...toolCall.shellStreamOutput.stdout],
+                stderr: [...toolCall.shellStreamOutput.stderr],
+                exitCode: toolCall.shellStreamOutput.exitCode,
+                signal: toolCall.shellStreamOutput.signal,
+                started: toolCall.shellStreamOutput.started,
+              }
+            : undefined,
+        })
+      ),
+      pendingInteractionQueryCount: session.pendingInteractionQueries.size,
+      projectContext: session.projectContext,
+      codeChunks: session.codeChunks,
+      cursorRules: session.cursorRules,
+      explicitContext: session.explicitContext,
+      contextTokenLimit: session.contextTokenLimit,
+      usedContextTokens: session.usedContextTokens,
+      requestedMaxOutputTokens: session.requestedMaxOutputTokens,
+      requestedModelParameters: session.requestedModelParameters,
+      usedTokens: session.usedTokens,
+      readPaths: Array.from(session.readPaths),
+      fileStates: Array.from(session.fileStates.entries()).map(
+        ([filePath, state]) => ({
+          path: filePath,
+          beforeContent: state.beforeContent,
+          afterContent: state.afterContent,
+        })
+      ),
+      messageBlobIds: [...session.messageBlobIds],
+      turns: [...session.turns],
+      currentAssistantMessage: session.currentAssistantMessage,
+      stepId: session.stepId,
+      execId: session.execId,
+      interactionQueryId: session.interactionQueryId,
+      todos: [...session.todos],
+      webDocuments: Array.from(session.webDocuments.values()).map((document) => ({
+        url: document.url,
+        title: document.title,
+        contentType: document.contentType,
+        chunks: [...document.chunks],
+        createdAt: this.toTimestamp(document.createdAt),
+      })),
+      subAgentContext: session.subAgentContext
+        ? {
+            parentToolCallId: session.subAgentContext.parentToolCallId,
+            parentModelCallId: session.subAgentContext.parentModelCallId,
+            subagentId: session.subAgentContext.subagentId,
+            messages: session.subAgentContext.messages,
+            model: session.subAgentContext.model,
+            tools: session.subAgentContext.tools,
+            accumulatedText: session.subAgentContext.accumulatedText,
+            pendingToolCallIds: Array.from(
+              session.subAgentContext.pendingToolCallIds
+            ),
+            startTime: session.subAgentContext.startTime,
+            turnCount: session.subAgentContext.turnCount,
+            toolCallCount: session.subAgentContext.toolCallCount,
+            modifiedFiles: [...session.subAgentContext.modifiedFiles],
+            currentTurnToolCalls:
+              session.subAgentContext.currentTurnToolCalls.map((toolCall) => ({
+                id: toolCall.id,
+                name: toolCall.name,
+                input: toolCall.input,
+              })),
+            expectedToolCallIds: Array.from(
+              session.subAgentContext.expectedToolCallIds
+            ),
+          }
+        : undefined,
+      restartRecovery: session.restartRecovery
+        ? {
+            restoredAt: this.toTimestamp(session.restartRecovery.restoredAt),
+            notice: session.restartRecovery.notice,
+            interruptedToolCalls:
+              session.restartRecovery.interruptedToolCalls.map((toolCall) => ({
+                toolCallId: toolCall.toolCallId,
+                toolName: toolCall.toolName,
+                sentAt: this.toTimestamp(toolCall.sentAt),
+              })),
+            interruptedInteractionQueryCount:
+              session.restartRecovery.interruptedInteractionQueryCount,
+            interruptedSubAgent: session.restartRecovery.interruptedSubAgent,
+          }
+        : undefined,
+    }
+  }
+
+  private buildRestartRecovery(
+    persisted: PersistedChatSessionV1
+  ): SessionRestartRecovery | undefined {
+    if (persisted.restartRecovery) {
+      return {
+        restoredAt: new Date(
+          this.toTimestamp(persisted.restartRecovery.restoredAt)
+        ),
+        notice: persisted.restartRecovery.notice,
+        interruptedToolCalls:
+          persisted.restartRecovery.interruptedToolCalls.map((toolCall) => ({
+            toolCallId: toolCall.toolCallId,
+            toolName: toolCall.toolName,
+            sentAt: new Date(this.toTimestamp(toolCall.sentAt)),
+          })),
+        interruptedInteractionQueryCount:
+          persisted.restartRecovery.interruptedInteractionQueryCount,
+        interruptedSubAgent: persisted.restartRecovery.interruptedSubAgent,
+      }
+    }
+
+    const interruptedToolCalls = Array.isArray(persisted.pendingToolCalls)
+      ? persisted.pendingToolCalls.map((toolCall) => ({
+          toolCallId: toolCall.toolCallId,
+          toolName: toolCall.toolName,
+          sentAt: new Date(this.toTimestamp(toolCall.sentAt)),
+        }))
+      : []
+    const interruptedInteractionQueryCount =
+      typeof persisted.pendingInteractionQueryCount === "number" &&
+      persisted.pendingInteractionQueryCount > 0
+        ? persisted.pendingInteractionQueryCount
+        : 0
+    const interruptedSubAgent = persisted.subAgentContext
+      ? {
+          subagentId: persisted.subAgentContext.subagentId,
+          parentToolCallId: persisted.subAgentContext.parentToolCallId,
+          turnCount: persisted.subAgentContext.turnCount,
+          toolCallCount: persisted.subAgentContext.toolCallCount,
+        }
+      : undefined
+
+    if (
+      interruptedToolCalls.length === 0 &&
+      interruptedInteractionQueryCount === 0 &&
+      !interruptedSubAgent
+    ) {
+      return undefined
+    }
+
+    const details: string[] = []
+    if (interruptedToolCalls.length > 0) {
+      const sampleNames = interruptedToolCalls
+        .slice(0, 3)
+        .map((toolCall) => toolCall.toolName || toolCall.toolCallId)
+      let toolSummary = `${interruptedToolCalls.length} pending tool call(s) were aborted`
+      if (sampleNames.length > 0) {
+        toolSummary += ` (${sampleNames.join(", ")}`
+        if (interruptedToolCalls.length > sampleNames.length) {
+          toolSummary += `, +${interruptedToolCalls.length - sampleNames.length} more`
+        }
+        toolSummary += `)`
+      }
+      details.push(toolSummary)
+    }
+    if (interruptedInteractionQueryCount > 0) {
+      details.push(
+        `${interruptedInteractionQueryCount} pending interaction quer${
+          interruptedInteractionQueryCount === 1 ? "y was" : "ies were"
+        } dropped`
+      )
+    }
+    if (interruptedSubAgent) {
+      details.push(
+        `sub-agent ${interruptedSubAgent.subagentId} was interrupted`
+      )
+    }
+
+    return {
+      restoredAt: new Date(),
+      notice:
+        `Proxy restarted before the previous turn finished. ${details.join("; ")}.` +
+        ` Please retry the interrupted action if needed.`,
+      interruptedToolCalls,
+      interruptedInteractionQueryCount,
+      interruptedSubAgent,
+    }
+  }
+
+  private deserializeSession(persisted: PersistedChatSessionV1): ChatSession {
+    const now = Date.now()
+    const createdAt = new Date(this.toTimestamp(persisted.createdAt, now))
+    const lastActivityAt = new Date(
+      this.toTimestamp(persisted.lastActivityAt, createdAt.getTime())
+    )
+
+    return {
+      conversationId: persisted.conversationId,
+      messages: Array.isArray(persisted.messages) ? persisted.messages : [],
+      model: persisted.model || "claude-sonnet-4.5",
+      thinkingLevel:
+        typeof persisted.thinkingLevel === "number"
+          ? persisted.thinkingLevel
+          : 0,
+      isAgentic: persisted.isAgentic === true,
+      supportedTools: Array.isArray(persisted.supportedTools)
+        ? persisted.supportedTools
+        : [],
+      mcpToolDefs: persisted.mcpToolDefs,
+      useWeb: persisted.useWeb === true,
+      createdAt,
+      lastActivityAt,
+      pendingToolCalls: new Map(),
+      pendingToolCallByExecId: new Map(),
+      projectContext: persisted.projectContext,
+      codeChunks: persisted.codeChunks,
+      cursorRules: persisted.cursorRules,
+      explicitContext: persisted.explicitContext,
+      contextTokenLimit: persisted.contextTokenLimit,
+      usedContextTokens: persisted.usedContextTokens,
+      requestedMaxOutputTokens: persisted.requestedMaxOutputTokens,
+      requestedModelParameters: persisted.requestedModelParameters,
+      usedTokens:
+        typeof persisted.usedTokens === "number" ? persisted.usedTokens : 0,
+      readPaths: new Set(
+        Array.isArray(persisted.readPaths) ? persisted.readPaths : []
+      ),
+      fileStates: new Map(
+        Array.isArray(persisted.fileStates)
+          ? persisted.fileStates.map((state) => [
+              state.path,
+              {
+                beforeContent: state.beforeContent,
+                afterContent: state.afterContent,
+              },
+            ])
+          : []
+      ),
+      messageBlobIds: Array.isArray(persisted.messageBlobIds)
+        ? persisted.messageBlobIds
+        : [],
+      turns: Array.isArray(persisted.turns) ? persisted.turns : [],
+      currentAssistantMessage: persisted.currentAssistantMessage,
+      stepId: typeof persisted.stepId === "number" ? persisted.stepId : 0,
+      execId: typeof persisted.execId === "number" ? persisted.execId : 1,
+      pendingInteractionQueries: new Map(),
+      interactionQueryId:
+        typeof persisted.interactionQueryId === "number"
+          ? persisted.interactionQueryId
+          : 0,
+      webDocuments: new Map(
+        Array.isArray(persisted.webDocuments)
+          ? persisted.webDocuments.map((document) => [
+              document.url,
+              {
+                url: document.url,
+                title: document.title,
+                contentType: document.contentType,
+                chunks: Array.isArray(document.chunks) ? document.chunks : [],
+                createdAt: new Date(this.toTimestamp(document.createdAt)),
+              },
+            ])
+          : []
+      ),
+      todos: Array.isArray(persisted.todos) ? persisted.todos : [],
+      subAgentContext: undefined,
+      restartRecovery: this.buildRestartRecovery(persisted),
+    }
+  }
+
+  private createFreshSession(
+    conversationId: string,
+    initialRequest?: ParsedCursorRequest
+  ): ChatSession {
+    return {
+      conversationId,
+      messages: initialRequest?.conversation || [],
+      model: initialRequest?.model || "claude-sonnet-4.5",
+      thinkingLevel: initialRequest?.thinkingLevel || 0,
+      isAgentic: initialRequest?.isAgentic || false,
+      supportedTools: initialRequest?.supportedTools || [],
+      mcpToolDefs: initialRequest?.mcpToolDefs,
+      useWeb: initialRequest?.useWeb || false,
+      createdAt: new Date(),
+      lastActivityAt: new Date(),
+      pendingToolCalls: new Map(),
+      pendingToolCallByExecId: new Map(),
+      projectContext: initialRequest?.projectContext,
+      codeChunks: initialRequest?.codeChunks,
+      cursorRules: initialRequest?.cursorRules,
+      explicitContext: initialRequest?.explicitContext,
+      contextTokenLimit: initialRequest?.contextTokenLimit,
+      usedContextTokens: initialRequest?.usedContextTokens,
+      requestedMaxOutputTokens: initialRequest?.requestedMaxOutputTokens,
+      requestedModelParameters: initialRequest?.requestedModelParameters,
+      usedTokens: initialRequest?.usedContextTokens || 0,
+      readPaths: new Set(),
+      fileStates: new Map(),
+      messageBlobIds: [],
+      turns: [],
+      currentAssistantMessage: undefined,
+      stepId: 0,
+      execId: 1,
+      pendingInteractionQueries: new Map(),
+      interactionQueryId: 0,
+      webDocuments: new Map(),
+      todos: [],
+      restartRecovery: undefined,
+    }
   }
 
   /**
    * Touch session activity timestamp to keep long-lived tool/interaction turns alive.
    */
   touchSession(conversationId: string): boolean {
-    const session = this.sessions.get(conversationId)
+    const session = this.getSession(conversationId)
     if (!session) return false
     session.lastActivityAt = new Date()
     return true
@@ -199,50 +878,16 @@ export class ChatSessionManager {
     conversationId: string,
     initialRequest?: ParsedCursorRequest
   ): ChatSession {
-    let session = this.sessions.get(conversationId)
+    let session = this.getSession(conversationId)
 
     if (!session) {
-      session = {
-        conversationId,
-        messages: initialRequest?.conversation || [],
-        model: initialRequest?.model || "claude-sonnet-4.5",
-        thinkingLevel: initialRequest?.thinkingLevel || 0,
-        isAgentic: initialRequest?.isAgentic || false,
-        supportedTools: initialRequest?.supportedTools || [],
-        mcpToolDefs: initialRequest?.mcpToolDefs,
-        useWeb: initialRequest?.useWeb || false,
-        createdAt: new Date(),
-        lastActivityAt: new Date(),
-        pendingToolCalls: new Map(),
-        pendingToolCallByExecId: new Map(),
-        projectContext: initialRequest?.projectContext,
-        codeChunks: initialRequest?.codeChunks,
-        cursorRules: initialRequest?.cursorRules,
-        explicitContext: initialRequest?.explicitContext,
-        contextTokenLimit: initialRequest?.contextTokenLimit,
-        usedContextTokens: initialRequest?.usedContextTokens,
-        requestedMaxOutputTokens: initialRequest?.requestedMaxOutputTokens,
-        requestedModelParameters: initialRequest?.requestedModelParameters,
-        usedTokens: initialRequest?.usedContextTokens || 0,
-        readPaths: new Set(),
-        fileStates: new Map(),
-        messageBlobIds: [],
-        turns: [],
-        currentAssistantMessage: undefined,
-        stepId: 0,
-        execId: 1,
-        pendingInteractionQueries: new Map(),
-        interactionQueryId: 0,
-        webDocuments: new Map(),
-        todos: [],
-      }
+      session = this.createFreshSession(conversationId, initialRequest)
 
       this.sessions.set(conversationId, session)
       this.logger.log(
         `>>> Created new session: ${conversationId} (model: ${session.model})`
       )
     } else {
-      // Update last activity
       session.lastActivityAt = new Date()
 
       // Refresh protocol fields on every turn so continuation strictly follows Cursor request.
@@ -291,6 +936,7 @@ export class ChatSessionManager {
       )
     }
 
+    this.schedulePersist(conversationId)
     return session
   }
 
@@ -302,7 +948,7 @@ export class ChatSessionManager {
     role: "user" | "assistant",
     content: MessageContent
   ): void {
-    const session = this.sessions.get(conversationId)
+    const session = this.getSession(conversationId)
     if (session) {
       session.messages.push({ role, content })
       session.lastActivityAt = new Date()
@@ -311,6 +957,7 @@ export class ChatSessionManager {
       const contentStr =
         typeof content === "string" ? content : JSON.stringify(content)
       session.usedTokens += Math.ceil(contentStr.length / 4)
+      this.schedulePersist(conversationId)
     }
   }
 
@@ -319,13 +966,14 @@ export class ChatSessionManager {
    * This is used for building conversationCheckpointUpdate
    */
   addMessageBlobId(conversationId: string, blobId: string): void {
-    const session = this.sessions.get(conversationId)
+    const session = this.getSession(conversationId)
     if (session) {
       session.lastActivityAt = new Date()
       session.messageBlobIds.push(blobId)
       this.logger.log(
         `>>> Added blobId to session ${conversationId}: ${blobId.substring(0, 20)}... (total: ${session.messageBlobIds.length})`
       )
+      this.schedulePersist(conversationId)
     } else {
       this.logger.error(
         `>>> FAILED to add blobId - session not found: ${conversationId}`
@@ -338,13 +986,14 @@ export class ChatSessionManager {
    * Turns are cumulative identifiers for each conversation round
    */
   addTurn(conversationId: string, turnId: string): void {
-    const session = this.sessions.get(conversationId)
+    const session = this.getSession(conversationId)
     if (session) {
       session.lastActivityAt = new Date()
       session.turns.push(turnId)
       this.logger.log(
         `>>> Added turn ${session.turns.length} to session ${conversationId}: ${turnId.substring(0, 20)}...`
       )
+      this.schedulePersist(conversationId)
     } else {
       this.logger.error(
         `>>> FAILED to add turn - session not found: ${conversationId}`
@@ -359,10 +1008,11 @@ export class ChatSessionManager {
     conversationId: string,
     message: Record<string, unknown>
   ): void {
-    const session = this.sessions.get(conversationId)
+    const session = this.getSession(conversationId)
     if (session) {
       session.lastActivityAt = new Date()
       session.currentAssistantMessage = message
+      this.schedulePersist(conversationId)
     }
   }
 
@@ -370,10 +1020,11 @@ export class ChatSessionManager {
    * Clear current assistant message
    */
   clearCurrentAssistantMessage(conversationId: string): void {
-    const session = this.sessions.get(conversationId)
+    const session = this.getSession(conversationId)
     if (session) {
       session.lastActivityAt = new Date()
       session.currentAssistantMessage = undefined
+      this.schedulePersist(conversationId)
     }
   }
 
@@ -381,10 +1032,11 @@ export class ChatSessionManager {
    * Track file read operation
    */
   addReadPath(conversationId: string, filePath: string): void {
-    const session = this.sessions.get(conversationId)
+    const session = this.getSession(conversationId)
     if (session) {
       session.lastActivityAt = new Date()
       session.readPaths.add(filePath)
+      this.schedulePersist(conversationId)
     }
   }
 
@@ -392,7 +1044,7 @@ export class ChatSessionManager {
    * Initialize shell stream output tracking for a tool call
    */
   initShellStream(conversationId: string, toolCallId: string): void {
-    const session = this.sessions.get(conversationId)
+    const session = this.getSession(conversationId)
     if (!session) return
 
     const pendingCall = session.pendingToolCalls.get(toolCallId)
@@ -415,7 +1067,7 @@ export class ChatSessionManager {
     toolCallId: string,
     data: string
   ): void {
-    const session = this.sessions.get(conversationId)
+    const session = this.getSession(conversationId)
     if (!session) return
 
     const pendingCall = session.pendingToolCalls.get(toolCallId)
@@ -434,7 +1086,7 @@ export class ChatSessionManager {
     toolCallId: string,
     data: string
   ): void {
-    const session = this.sessions.get(conversationId)
+    const session = this.getSession(conversationId)
     if (!session) return
 
     const pendingCall = session.pendingToolCalls.get(toolCallId)
@@ -449,7 +1101,7 @@ export class ChatSessionManager {
    * Mark shell stream as started
    */
   markShellStarted(conversationId: string, toolCallId: string): void {
-    const session = this.sessions.get(conversationId)
+    const session = this.getSession(conversationId)
     if (!session) return
 
     const pendingCall = session.pendingToolCalls.get(toolCallId)
@@ -469,7 +1121,7 @@ export class ChatSessionManager {
     exitCode: number,
     signal?: string
   ): void {
-    const session = this.sessions.get(conversationId)
+    const session = this.getSession(conversationId)
     if (!session) return
 
     const pendingCall = session.pendingToolCalls.get(toolCallId)
@@ -490,7 +1142,7 @@ export class ChatSessionManager {
     conversationId: string,
     toolCallId: string
   ): { stdout: string; stderr: string; exitCode?: number } | null {
-    const session = this.sessions.get(conversationId)
+    const session = this.getSession(conversationId)
     if (!session) return null
 
     const pendingCall = session.pendingToolCalls.get(toolCallId)
@@ -507,7 +1159,7 @@ export class ChatSessionManager {
    * Check if shell stream is complete (has exit event)
    */
   isShellStreamComplete(conversationId: string, toolCallId: string): boolean {
-    const session = this.sessions.get(conversationId)
+    const session = this.getSession(conversationId)
     if (!session) return false
 
     const pendingCall = session.pendingToolCalls.get(toolCallId)
@@ -523,10 +1175,11 @@ export class ChatSessionManager {
     beforeContent: string,
     afterContent: string
   ): void {
-    const session = this.sessions.get(conversationId)
+    const session = this.getSession(conversationId)
     if (session) {
       session.lastActivityAt = new Date()
       session.fileStates.set(filePath, { beforeContent, afterContent })
+      this.schedulePersist(conversationId)
     }
   }
 
@@ -541,7 +1194,7 @@ export class ChatSessionManager {
     toolFamilyHint?: "mcp",
     modelCallId: string = ""
   ): Promise<void> {
-    const session = this.sessions.get(conversationId)
+    const session = this.getSession(conversationId)
     if (session) {
       // For edit tools, capture file content BEFORE the edit
       let beforeContent: string | undefined
@@ -578,6 +1231,7 @@ export class ChatSessionManager {
       this.logger.debug(
         `Added pending tool call: ${toolCallId} (${toolName}) for session ${conversationId}`
       )
+      this.schedulePersist(conversationId)
     }
   }
 
@@ -588,15 +1242,13 @@ export class ChatSessionManager {
     conversationId: string,
     toolCallId: string
   ): PendingToolCall | undefined {
-    const session = this.sessions.get(conversationId)
+    const session = this.getSession(conversationId)
     if (session) {
       const toolCall = session.pendingToolCalls.get(toolCallId)
       if (toolCall) {
-        // Remove all execId mappings associated with this tool call.
         for (const execId of toolCall.execIds) {
           session.pendingToolCallByExecId.delete(execId)
         }
-        // Defensive cleanup in case execIds set was incomplete.
         for (const [
           execId,
           mappedToolCallId,
@@ -610,6 +1262,7 @@ export class ChatSessionManager {
         this.logger.debug(
           `Consumed tool call: ${toolCallId} for session ${conversationId}`
         )
+        this.schedulePersist(conversationId)
         return toolCall
       }
     }
@@ -621,7 +1274,7 @@ export class ChatSessionManager {
     toolCallId: string,
     execIdNumber: number
   ): boolean {
-    const session = this.sessions.get(conversationId)
+    const session = this.getSession(conversationId)
     if (!session) return false
     if (!Number.isFinite(execIdNumber) || execIdNumber <= 0) return false
 
@@ -640,23 +1293,25 @@ export class ChatSessionManager {
     this.logger.debug(
       `Mapped execId=${normalizedExecId} -> toolCallId=${toolCallId} for session ${conversationId}`
     )
+    this.schedulePersist(conversationId)
     return true
   }
 
   markPendingToolCallStarted(conversationId: string, toolCallId: string): void {
-    const session = this.sessions.get(conversationId)
+    const session = this.getSession(conversationId)
     if (!session) return
     const pending = session.pendingToolCalls.get(toolCallId)
     if (!pending) return
     session.lastActivityAt = new Date()
     pending.startedEmitted = true
+    this.schedulePersist(conversationId)
   }
 
   getPendingToolCallIdByExecId(
     conversationId: string,
     execIdNumber: number
   ): string | undefined {
-    const session = this.sessions.get(conversationId)
+    const session = this.getSession(conversationId)
     if (!session) return undefined
     if (!Number.isFinite(execIdNumber) || execIdNumber <= 0) return undefined
     return session.pendingToolCallByExecId.get(Math.floor(execIdNumber))
@@ -683,7 +1338,7 @@ export class ChatSessionManager {
     queryType: string,
     payload?: Record<string, unknown>
   ): { id: number; promise: Promise<any> } {
-    const session = this.sessions.get(conversationId)
+    const session = this.getSession(conversationId)
     if (!session) {
       throw new Error(`Session not found: ${conversationId}`)
     }
@@ -710,6 +1365,7 @@ export class ChatSessionManager {
       `Registered InteractionQuery id=${queryId} type=${queryType} for ${conversationId}`
     )
 
+    this.schedulePersist(conversationId)
     return { id: queryId, promise }
   }
 
@@ -721,7 +1377,7 @@ export class ChatSessionManager {
     queryId: number,
     response: any
   ): { queryType: string; payload?: Record<string, unknown> } | null {
-    const session = this.sessions.get(conversationId)
+    const session = this.getSession(conversationId)
     if (!session) {
       this.logger.warn(
         `resolveInteractionQuery: session not found ${conversationId}`
@@ -743,6 +1399,7 @@ export class ChatSessionManager {
     pending.resolve(response)
     session.pendingInteractionQueries.delete(queryId)
     session.lastActivityAt = new Date()
+    this.schedulePersist(conversationId)
     return {
       queryType: pending.queryType,
       payload: pending.payload,
@@ -753,7 +1410,7 @@ export class ChatSessionManager {
    * Get session
    */
   getSession(conversationId: string): ChatSession | undefined {
-    return this.sessions.get(conversationId)
+    return this.sessions.get(conversationId) || this.loadPersistedSession(conversationId)
   }
 
   /**
@@ -764,7 +1421,9 @@ export class ChatSessionManager {
     if (session) {
       session.pendingInteractionQueries.clear()
     }
+    this.clearScheduledPersist(conversationId)
     this.sessions.delete(conversationId)
+    this.deletePersistedSession(conversationId)
     this.logger.log(`Deleted session: ${conversationId}`)
   }
 
@@ -790,6 +1449,7 @@ export class ChatSessionManager {
         continue
       }
 
+      this.clearScheduledPersist(conversationId)
       this.sessions.delete(conversationId)
       cleanedCount++
     }
@@ -830,26 +1490,28 @@ export class ChatSessionManager {
   // ── Sub-Agent Context helpers ──────────────────────────
 
   setSubAgentContext(conversationId: string, context: SubAgentContext): void {
-    const session = this.sessions.get(conversationId)
+    const session = this.getSession(conversationId)
     if (session) {
       session.subAgentContext = context
       session.lastActivityAt = new Date()
       this.logger.log(
         `Set SubAgentContext for ${conversationId}: subagentId=${context.subagentId}, parentToolCallId=${context.parentToolCallId}`
       )
+      this.schedulePersist(conversationId)
     }
   }
 
   getSubAgentContext(conversationId: string): SubAgentContext | undefined {
-    return this.sessions.get(conversationId)?.subAgentContext
+    return this.getSession(conversationId)?.subAgentContext
   }
 
   clearSubAgentContext(conversationId: string): void {
-    const session = this.sessions.get(conversationId)
+    const session = this.getSession(conversationId)
     if (session) {
       session.subAgentContext = undefined
       session.lastActivityAt = new Date()
       this.logger.log(`Cleared SubAgentContext for ${conversationId}`)
+      this.schedulePersist(conversationId)
     }
   }
 
@@ -857,7 +1519,82 @@ export class ChatSessionManager {
    * Check if a tool call ID belongs to the active sub-agent.
    */
   isSubAgentToolCall(conversationId: string, toolCallId: string): boolean {
-    const ctx = this.sessions.get(conversationId)?.subAgentContext
+    const ctx = this.getSession(conversationId)?.subAgentContext
     return !!ctx && ctx.pendingToolCallIds.has(toolCallId)
+  }
+
+  replaceMessages(
+    conversationId: string,
+    messages: Array<{ role: "user" | "assistant"; content: MessageContent }>
+  ): void {
+    const session = this.getSession(conversationId)
+    if (!session) return
+    session.messages = messages
+    session.lastActivityAt = new Date()
+    this.schedulePersist(conversationId)
+  }
+
+  replaceTodos(conversationId: string, todos: SessionTodoItem[]): void {
+    const session = this.getSession(conversationId)
+    if (!session) return
+    session.todos = todos
+    session.lastActivityAt = new Date()
+    this.schedulePersist(conversationId)
+  }
+
+  setWebDocument(
+    conversationId: string,
+    url: string,
+    document: {
+      url: string
+      title: string
+      contentType: string
+      chunks: string[]
+      createdAt: Date
+    }
+  ): void {
+    const session = this.getSession(conversationId)
+    if (!session) {
+      throw new Error(`Session not found: ${conversationId}`)
+    }
+    session.webDocuments.set(url, document)
+    session.lastActivityAt = new Date()
+    this.schedulePersist(conversationId)
+  }
+
+  nextExecId(conversationId: string): number {
+    const session = this.getSession(conversationId)
+    if (!session) {
+      throw new Error(`Session not found: ${conversationId}`)
+    }
+    const next = session.execId++
+    session.lastActivityAt = new Date()
+    this.schedulePersist(conversationId)
+    return next
+  }
+
+  incrementStepId(conversationId: string): number {
+    const session = this.getSession(conversationId)
+    if (!session) {
+      throw new Error(`Session not found: ${conversationId}`)
+    }
+    session.stepId++
+    session.lastActivityAt = new Date()
+    this.schedulePersist(conversationId)
+    return session.stepId
+  }
+
+  getRestartRecovery(
+    conversationId: string
+  ): SessionRestartRecovery | undefined {
+    return this.getSession(conversationId)?.restartRecovery
+  }
+
+  clearRestartRecovery(conversationId: string): void {
+    const session = this.getSession(conversationId)
+    if (!session) return
+    session.restartRecovery = undefined
+    session.lastActivityAt = new Date()
+    this.schedulePersist(conversationId)
   }
 }

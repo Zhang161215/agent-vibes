@@ -128,6 +128,7 @@ async function bootstrap() {
     AppModule,
     fastifyAdapter
   )
+  app.enableShutdownHooks()
 
   // Enable CORS
   await fastifyInstance.register(fastifyCors, {

@@ -113,6 +113,11 @@ export class AiserverMockController {
     this.sendEmpty(res)
   }
 
+  @Post("aiserver.v1.DashboardService/GetManagedSkills")
+  handleDashboardGetManagedSkills(@Res() res: FastifyReply): void {
+    this.sendEmpty(res)
+  }
+
   @Post("aiserver.v1.DashboardService/GetTeams")
   handleDashboardGetTeams(@Res() res: FastifyReply): void {
     this.sendEmpty(res)
@@ -573,6 +578,24 @@ export class AiserverMockController {
   handleTraces(@Req() req: FastifyRequest, @Res() res: FastifyReply): void {
     // Accept both JSON and protobuf content types for OTLP traces
     res.status(200).send({})
+  }
+
+  @Get("updates/api/update/:platform/:product/:version/:machineId/:track")
+  handleUpdateCheck(@Res() res: FastifyReply): void {
+    // Cursor treats HTTP 204 as "already on latest version".
+    res.status(204).send()
+  }
+
+  @Get("extensions-control")
+  handleExtensionsControl(@Res() res: FastifyReply): void {
+    res.header("Content-Type", "application/json")
+    res.status(200).send({
+      malicious: [],
+      deprecated: {},
+      search: [],
+      migrateToPreRelease: {},
+      extensionsEnabledWithPreRelease: [],
+    })
   }
 
   // ── agent.v1 supplementary endpoints ──
