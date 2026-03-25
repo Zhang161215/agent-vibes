@@ -358,7 +358,7 @@ async function cloudCodeRequest(apiMethod, payload) {
         Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
         "User-Agent": getUserAgent(),
-        "Accept-Encoding": "gzip",
+        // Accept-Encoding gzip removed for system Node.js compatibility
       },
       body,
     })
@@ -419,7 +419,7 @@ async function* cloudCodeStreamRequest(apiMethod, payload) {
         Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
         "User-Agent": getUserAgent(),
-        "Accept-Encoding": "gzip",
+        // Accept-Encoding gzip removed for system Node.js compatibility
       },
       body,
     })
@@ -500,6 +500,24 @@ async function* cloudCodeStreamRequest(apiMethod, payload) {
 // ---------------------------------------------------------------------------
 async function handleInit(params) {
   initializeClient(params.account)
+
+  // Force refresh access token on init.
+  // When running on a server with ANTIGRAVITY_NODE_BINARY=/usr/bin/node,
+  // the access_token from accounts.json is often stale (refreshed via other
+  // channels like CPA). getAccessToken() may not auto-refresh if expiry_date
+  // looks valid, so we explicitly call refreshAccessToken() here.
+  try {
+    const { credentials } = await oauthClient.refreshAccessToken()
+    oauthClient.setCredentials(credentials)
+    process.stderr.write(
+      `[init] Token refreshed, expires: ${new Date(credentials.expiry_date)}\n`
+    )
+  } catch (refreshErr) {
+    process.stderr.write(
+      `[init] Token refresh failed: ${refreshErr.message}\n`
+    )
+  }
+
   return { status: "ok", endpoint }
 }
 
