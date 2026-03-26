@@ -237,6 +237,9 @@ export class ProcessPoolService implements OnModuleInit, OnModuleDestroy {
             project?: string | null
           } | undefined
           // Store tier and project info
+          this.logger.debug(
+            `[Worker ${worker.account.email}] checkAvailability result: ${JSON.stringify(result)}`
+          )
           if (result?.tier?.id) worker.tier = result.tier.id
           if (result?.project) worker.project = result.project
           this.logger.log(
