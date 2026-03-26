@@ -536,7 +536,12 @@ async function handleCheckAvailability() {
   if (result && result.cloudaicompanionProject) {
     cloudaicompanionProject = result.cloudaicompanionProject
   }
-  return { available: true }
+  return {
+    available: true,
+    tier: result?.currentTier || null,
+    project: result?.cloudaicompanionProject || null,
+    supportedModels: result?.supportedModels || null,
+  }
 }
 
 async function handleGenerate(id, params) {

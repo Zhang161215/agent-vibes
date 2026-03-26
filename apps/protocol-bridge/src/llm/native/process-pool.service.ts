@@ -55,6 +55,11 @@ interface WorkerHandle {
   cooldownUntil: number // Date.now() timestamp; 0 = available
   bootstrapComplete: boolean
   readyResolve?: () => void // event-driven ready notification
+  // Enhanced status fields
+  tier: string | null // Cloud Code tier (e.g. "free", "standard")
+  project: string | null // Cloud Code project ID
+  lastError: string | null // Last error message
+  lastErrorAt: number // Timestamp of last error
 }
 
 const WORKER_SCRIPT = path.resolve(__dirname, "worker.js")
@@ -227,12 +232,20 @@ export class ProcessPoolService implements OnModuleInit, OnModuleDestroy {
       .map(async (worker) => {
         try {
           await this.primeWorkerBootstrap(worker)
-          await this.sendRequest(worker, "checkAvailability", undefined, 15000)
+          const result = (await this.sendRequest(worker, "checkAvailability", undefined, 15000)) as {
+            tier?: { id?: string } | null
+            project?: string | null
+          } | undefined
+          // Store tier and project info
+          if (result?.tier?.id) worker.tier = result.tier.id
+          if (result?.project) worker.project = result.project
           this.logger.log(
-            `[Worker ${worker.account.email}] quota check: ✓ available`
+            `[Worker ${worker.account.email}] quota check: ✓ available (tier=${worker.tier || "unknown"}, project=${worker.project || "unknown"})`
           )
         } catch (err) {
           const msg = (err as Error).message || ""
+          worker.lastError = msg.slice(0, 200)
+          worker.lastErrorAt = Date.now()
           if (msg.includes("429")) {
             worker.cooldownUntil = Date.now() + PREFLIGHT_COOLDOWN_MS
             this.logger.warn(
@@ -327,6 +340,10 @@ export class ProcessPoolService implements OnModuleInit, OnModuleDestroy {
       requestCount: 0,
       cooldownUntil: 0,
       bootstrapComplete: false,
+      tier: null,
+      project: null,
+      lastError: null,
+      lastErrorAt: 0,
     }
 
     // Parse stdout as JSON Lines
@@ -713,7 +730,7 @@ export class ProcessPoolService implements OnModuleInit, OnModuleDestroy {
   /**
    * Mark the current worker as rate-limited for `delayMs` milliseconds.
    */
-  setCooldown(delayMs: number): void {
+  setCooldown(delayMs: number, reason?: string): void {
     const now = Date.now()
     const readyWorkers = this.workers.filter((w) => w.ready)
     if (readyWorkers.length === 0) return
@@ -721,6 +738,10 @@ export class ProcessPoolService implements OnModuleInit, OnModuleDestroy {
     const worker = readyWorkers[idx]
     if (!worker) return
     worker.cooldownUntil = now + delayMs
+    if (reason) {
+      worker.lastError = reason.slice(0, 200)
+      worker.lastErrorAt = now
+    }
     const readableDuration =
       delayMs >= 3600_000
         ? `${Math.floor(delayMs / 3600_000)}h ${Math.floor((delayMs % 3600_000) / 60_000)}m`
@@ -909,8 +930,14 @@ export class ProcessPoolService implements OnModuleInit, OnModuleDestroy {
       email: string
       ready: boolean
       cooldownUntil: number
+      cooldownRemaining: number
       requestCount: number
       pid: number | undefined
+      tier: string | null
+      project: string | null
+      lastError: string | null
+      lastErrorAt: number
+      tokenExpiry: string | null
     }>
   } {
     const now = Date.now()
@@ -923,8 +950,14 @@ export class ProcessPoolService implements OnModuleInit, OnModuleDestroy {
         email: w.account.email,
         ready: w.ready,
         cooldownUntil: w.cooldownUntil,
+        cooldownRemaining: Math.max(0, w.cooldownUntil - now),
         requestCount: w.requestCount,
         pid: w.process.pid,
+        tier: w.tier,
+        project: w.project,
+        lastError: w.lastError,
+        lastErrorAt: w.lastErrorAt,
+        tokenExpiry: w.account.expiresAt || null,
       })),
     }
   }

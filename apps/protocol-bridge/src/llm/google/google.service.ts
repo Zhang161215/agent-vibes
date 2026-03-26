@@ -2964,7 +2964,7 @@ export class GoogleService {
             exhausted && retryMs !== null
               ? retryMs
               : Math.min(retryMs ?? 60_000, this.MAX_429_WAIT_MS)
-          this.processPool.setCooldown(cooldownMs)
+          this.processPool.setCooldown(cooldownMs, exhausted ? "配额耗尽 (QUOTA_EXHAUSTED)" : "请求限流 (RATE_LIMITED)")
 
           if (this.processPool.hasAvailableWorker()) {
             this.logger.warn(
@@ -3221,7 +3221,7 @@ export class GoogleService {
               exhausted && retryMs !== null
                 ? retryMs
                 : Math.min(retryMs ?? 60_000, self.MAX_429_WAIT_MS)
-            self.processPool.setCooldown(cooldownMs)
+            self.processPool.setCooldown(cooldownMs, exhausted ? "配额耗尽 (QUOTA_EXHAUSTED)" : "请求限流 (RATE_LIMITED)")
 
             if (!isLast && self.processPool.hasAvailableWorker()) {
               self.logger.warn(

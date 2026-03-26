@@ -43,6 +43,7 @@
     .q-medium{background:linear-gradient(90deg,#f97316,#f59e0b)}
     .q-low{background:linear-gradient(90deg,#ef4444,#f97316)}
     .q-critical{background:linear-gradient(90deg,#991b1b,#ef4444)}
+    @keyframes shrink-bar{from{width:100%}to{width:0%}}
     /* Tier badges */
     .tier-pro{background:rgba(29,78,216,.15);color:#60a5fa;border:1px solid rgba(29,78,216,.3)}
     .tier-ultra{background:rgba(249,115,22,.15);color:#fb923c;border:1px solid rgba(249,115,22,.3)}
@@ -255,10 +256,15 @@
                          :class="darkMode?'bg-surface-3 text-gray-400':'bg-gray-100 text-gray-500'" x-text="idx+1"></div>
                     <div class="flex-1 min-w-0">
                       <div class="font-mono text-sm truncate" :class="darkMode?'text-white':'text-gray-900'" x-text="acc.email"></div>
+                      <!-- Project + Tier 信息 -->
+                      <div class="flex items-center gap-2 mt-0.5">
+                        <span x-show="getWorkerStatus(acc.email)?.project" class="text-[10px] font-mono" :class="darkMode?'text-gray-500':'text-gray-400'" x-text="getWorkerStatus(acc.email)?.project"></span>
+                        <span x-show="getWorkerStatus(acc.email)?.tier" class="text-[10px] font-bold px-1.5 py-0.5 rounded-full uppercase" :class="'tier-'+(getWorkerStatus(acc.email)?.tier||'free').toLowerCase()" x-text="getWorkerStatus(acc.email)?.tier"></span>
+                      </div>
                     </div>
-                    <!-- Worker 状态（运行时） -->
+                    <!-- Worker 状态徽章 -->
                     <template x-if="getWorkerStatus(acc.email)">
-                      <span class="text-[10px] font-medium px-2 py-0.5 rounded-full uppercase" :class="getWorkerStatus(acc.email).ready?(darkMode?'bg-green-900/20 text-green-400 border border-green-800':'bg-green-50 text-green-600 border border-green-200'):(darkMode?'bg-red-900/20 text-red-400 border border-red-800':'bg-red-50 text-red-600 border border-red-200')" x-text="getWorkerStatus(acc.email).ready?'运行中':'离线'"></span>
+                      <span class="text-[10px] font-medium px-2 py-0.5 rounded-full" :class="workerBadgeClass(acc.email)" x-text="workerBadgeText(acc.email)"></span>
                     </template>
                     <template x-if="!getWorkerStatus(acc.email)">
                       <span class="text-[10px] font-medium px-2 py-0.5 rounded-full" :class="darkMode?'bg-surface-3 text-gray-500':'bg-gray-100 text-gray-400'">未加载</span>
@@ -268,34 +274,58 @@
                     </button>
                   </div>
 
-                  <!-- 运行时信息（从 pool/status 获取） -->
+                  <!-- 运行时信息 -->
                   <template x-if="getWorkerStatus(acc.email)">
-                    <div class="grid grid-cols-2 gap-3 mb-3">
-                      <div class="rounded-lg p-2.5 transition-colors" :class="darkMode?'bg-surface-2':'bg-gray-50'">
-                        <div class="text-[10px] uppercase tracking-wider mb-1" :class="darkMode?'text-gray-500':'text-gray-400'">已处理请求</div>
-                        <div class="text-lg font-bold" :class="darkMode?'text-white':'text-gray-900'" x-text="getWorkerStatus(acc.email).requestCount"></div>
-                      </div>
-                      <div class="rounded-lg p-2.5 transition-colors" :class="darkMode?'bg-surface-2':'bg-gray-50'">
-                        <div class="text-[10px] uppercase tracking-wider mb-1" :class="darkMode?'text-gray-500':'text-gray-400'">进程状态</div>
-                        <div class="text-sm font-medium mt-1">
-                          <template x-if="getWorkerStatus(acc.email).cooldownUntil>Date.now()">
-                            <span class="text-yellow-500">冷却中 · <span x-text="fmtCd(getWorkerStatus(acc.email).cooldownUntil)"></span></span>
-                          </template>
-                          <template x-if="getWorkerStatus(acc.email).cooldownUntil<=Date.now()&&getWorkerStatus(acc.email).ready">
-                            <span class="text-green-500">可用</span>
-                          </template>
-                          <template x-if="!getWorkerStatus(acc.email).ready">
-                            <span class="text-red-500">离线</span>
-                          </template>
+                    <div>
+                      <div class="grid grid-cols-3 gap-2 mb-3">
+                        <div class="rounded-lg p-2 transition-colors" :class="darkMode?'bg-surface-2':'bg-gray-50'">
+                          <div class="text-[10px] uppercase tracking-wider" :class="darkMode?'text-gray-500':'text-gray-400'">请求数</div>
+                          <div class="text-base font-bold mt-0.5" :class="darkMode?'text-white':'text-gray-900'" x-text="getWorkerStatus(acc.email).requestCount"></div>
+                        </div>
+                        <div class="rounded-lg p-2 transition-colors" :class="darkMode?'bg-surface-2':'bg-gray-50'">
+                          <div class="text-[10px] uppercase tracking-wider" :class="darkMode?'text-gray-500':'text-gray-400'">状态</div>
+                          <div class="text-sm font-medium mt-0.5">
+                            <template x-if="getWorkerStatus(acc.email).cooldownRemaining>0">
+                              <span class="text-yellow-500" x-text="'限流 '+fmtCd(getWorkerStatus(acc.email).cooldownUntil)"></span>
+                            </template>
+                            <template x-if="getWorkerStatus(acc.email).cooldownRemaining<=0&&getWorkerStatus(acc.email).ready">
+                              <span class="text-green-500">可用</span>
+                            </template>
+                            <template x-if="!getWorkerStatus(acc.email).ready">
+                              <span class="text-red-500">离线</span>
+                            </template>
+                          </div>
+                        </div>
+                        <div class="rounded-lg p-2 transition-colors" :class="darkMode?'bg-surface-2':'bg-gray-50'">
+                          <div class="text-[10px] uppercase tracking-wider" :class="darkMode?'text-gray-500':'text-gray-400'">Token</div>
+                          <div class="text-sm font-medium mt-0.5" :class="isExpired(getWorkerStatus(acc.email).tokenExpiry)?'text-red-500':'text-green-500'" x-text="isExpired(getWorkerStatus(acc.email).tokenExpiry)?'已过期':'有效'"></div>
                         </div>
                       </div>
+
+                      <!-- 冷却进度条 (限流中时显示) -->
+                      <template x-if="getWorkerStatus(acc.email).cooldownRemaining>0">
+                        <div class="mb-3">
+                          <div class="flex items-center justify-between text-[10px] mb-1">
+                            <span :class="darkMode?'text-yellow-400':'text-yellow-600'" x-text="getWorkerStatus(acc.email).lastError||'请求限流'"></span>
+                            <span :class="darkMode?'text-gray-500':'text-gray-400'" x-text="fmtCd(getWorkerStatus(acc.email).cooldownUntil)+' 后恢复'"></span>
+                          </div>
+                          <div class="q-bar"><div class="q-bar-bg"></div><div class="q-bar-fill q-medium" style="width:100%;animation:shrink-bar linear forwards" :style="'animation-duration:'+getWorkerStatus(acc.email).cooldownRemaining+'ms'"></div></div>
+                        </div>
+                      </template>
+
+                      <!-- 最近错误 -->
+                      <template x-if="getWorkerStatus(acc.email).lastError&&getWorkerStatus(acc.email).cooldownRemaining<=0">
+                        <div class="text-[10px] px-2 py-1 rounded mb-2" :class="darkMode?'bg-red-900/10 text-red-400':'bg-red-50 text-red-600'">
+                          上次错误: <span x-text="getWorkerStatus(acc.email).lastError.substring(0,80)"></span>
+                          <span :class="darkMode?'text-gray-600':'text-gray-400'" x-text="' · '+fmtTime(new Date(getWorkerStatus(acc.email).lastErrorAt).toISOString())"></span>
+                        </div>
+                      </template>
                     </div>
                   </template>
 
-                  <!-- Token 信息 -->
+                  <!-- Token 详情 -->
                   <div class="flex items-center gap-2 text-xs flex-wrap" :class="darkMode?'text-gray-500':'text-gray-400'">
                     <span>Token: <code class="token-mask font-mono" @click="$el.classList.toggle('revealed')" x-text="acc.accessToken?.substring(0,20)+'...'"></code></span>
-                    <span x-show="acc.expiresAt" :class="isExpired(acc.expiresAt)?'text-red-500':'text-green-500'" x-text="isExpired(acc.expiresAt)?'已过期':'有效'"></span>
                     <span x-show="acc.expiresAt" :class="darkMode?'text-gray-600':'text-gray-400'" x-text="'过期: '+fmtTime(acc.expiresAt)"></span>
                   </div>
                 </div>
@@ -541,6 +571,19 @@ function app(){return{
   async fetchSystemInfo(){try{this.systemInfo=await this.api('GET','/admin/system')}catch(e){console.error(e)}},
 
   getWorkerStatus(email){return this.poolStatus?.workers?.find(w=>w.email===email)||null},
+
+  workerBadgeClass(email){
+    const w=this.getWorkerStatus(email);if(!w)return''
+    if(!w.ready)return this.darkMode?'bg-red-900/20 text-red-400 border border-red-800':'bg-red-50 text-red-600 border border-red-200'
+    if(w.cooldownRemaining>0)return this.darkMode?'bg-yellow-900/20 text-yellow-400 border border-yellow-800':'bg-yellow-50 text-yellow-600 border border-yellow-200'
+    return this.darkMode?'bg-green-900/20 text-green-400 border border-green-800':'bg-green-50 text-green-600 border border-green-200'
+  },
+  workerBadgeText(email){
+    const w=this.getWorkerStatus(email);if(!w)return'未知'
+    if(!w.ready)return'离线'
+    if(w.cooldownRemaining>0)return'限流中'
+    return'运行中'
+  },
 
   async addAccount(){
     try{const acc={...this.newAccount};if(!acc.expiresAt)delete acc.expiresAt;const r=await this.api('POST','/admin/accounts',acc);this.showToast(r.message);this.showAddAccount=false;this.newAccount={email:'',accessToken:'',refreshToken:'',expiresAt:''};await this.fetchAccounts()}catch(e){this.showToast(e.message,'error')}
