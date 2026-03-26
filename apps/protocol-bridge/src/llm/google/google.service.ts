@@ -1360,7 +1360,11 @@ export class GoogleService {
    */
   private convertToAnthropicFormat(
     googleResponse: Record<string, unknown>,
-    model: string
+    model: string,
+    tools?: Array<{
+      name: string
+      input_schema?: { properties?: Record<string, unknown> }
+    }>
   ): AnthropicResponse {
     // Cloud Code wraps response in 'response' key
     const responseData =
@@ -1481,11 +1485,22 @@ export class GoogleService {
             ? part.functionCall.id
             : makeToolUseId()
 
+        // Filter out extra args that Cloud Code model may hallucinate
+        const rawArgs = part.functionCall.args || {}
+        const allowedNonStream = tools?.find(
+          (t) => t.name === part.functionCall!.name
+        )?.input_schema?.properties
+        const cleanedInput = allowedNonStream
+          ? Object.fromEntries(
+              Object.entries(rawArgs).filter(([k]) => k in allowedNonStream)
+            )
+          : rawArgs
+
         const toolUseBlock = {
           type: "tool_use",
           id: toolId,
           name: part.functionCall.name,
-          input: part.functionCall.args || {},
+          input: cleanedInput,
         }
 
         this.rememberToolName(toolId, part.functionCall.name)
@@ -2902,7 +2917,10 @@ export class GoogleService {
         })
 
         this.logger.log(`Claude response received from Cloud Code API`)
-        return this.convertToAnthropicFormat(data, dto.model)
+        return this.convertToAnthropicFormat(data, dto.model, dto.tools as Array<{
+          name: string
+          input_schema?: { properties?: Record<string, unknown> }
+        }>)
       } catch (error) {
         const errMsg = (error as Error).message || ""
 
@@ -3253,6 +3271,25 @@ export class GoogleService {
       }
     }
 
+    // Build a map of tool name → allowed property names from the original
+    // Anthropic input_schema. This is used to strip extra parameters that
+    // Cloud Code's model might hallucinate (because sanitizeSchema removes
+    // `additionalProperties: false` for Google API compatibility).
+    const toolAllowedProps = new Map<string, Set<string>>()
+    if (dto.tools && Array.isArray(dto.tools)) {
+      for (const tool of dto.tools as Array<{
+        name: string
+        input_schema?: { properties?: Record<string, unknown> }
+      }>) {
+        if (tool.input_schema?.properties) {
+          toolAllowedProps.set(
+            tool.name,
+            new Set(Object.keys(tool.input_schema.properties))
+          )
+        }
+      }
+    }
+
     // Chunk handler extracted so it can be reused across retry attempts
     const onChunkHandler = (chunk: unknown) => {
       const data = chunk as Record<string, unknown>
@@ -3301,6 +3338,16 @@ export class GoogleService {
 
         if (part.functionCall) {
           hasToolCall = true
+
+          // Filter out extra args that Cloud Code model may hallucinate
+          // (because sanitizeSchema strips additionalProperties:false)
+          const rawArgs = part.functionCall.args || {}
+          const allowed = toolAllowedProps.get(part.functionCall.name)
+          const cleanedArgs = allowed
+            ? Object.fromEntries(
+                Object.entries(rawArgs).filter(([k]) => allowed.has(k))
+              )
+            : rawArgs
           if (signature && hasThinking) {
             if (blockType === BLOCK_THINKING) {
               pendingSignature = signature
@@ -3326,7 +3373,7 @@ export class GoogleService {
               input: {},
             })
           )
-          const inputJson = JSON.stringify(part.functionCall.args || {})
+          const inputJson = JSON.stringify(cleanedArgs)
           const CHUNK_SIZE = 80
           for (let i = 0; i < inputJson.length; i += CHUNK_SIZE) {
             push(
