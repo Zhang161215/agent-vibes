@@ -72,8 +72,8 @@ const GEMINI_MODELS: Record<
     isThinking: false,
   },
   "gemini-3-flash": {
-    cloudCodeId: "gemini-3-flash-preview",
-    displayName: "Gemini 3 Flash",
+    cloudCodeId: "gemini-2.5-flash",
+    displayName: "Gemini 3 Flash (→ 2.5 Flash)",
     isThinking: false,
   },
   "gemini-2.5-flash": {
@@ -94,23 +94,23 @@ const GEMINI_MODELS: Record<
   // Claude Haiku → Gemini Flash (haiku is used by Claude Code CLI for
   // lightweight init/token-count requests; route to fast Gemini model)
   "claude-haiku-4-5": {
-    cloudCodeId: "gemini-3-flash-preview",
-    displayName: "Claude 4.5 Haiku (→ Gemini 3 Flash)",
+    cloudCodeId: "gemini-2.5-flash",
+    displayName: "Claude 4.5 Haiku (→ Gemini 2.5 Flash)",
     isThinking: false,
   },
   "claude-haiku-4.5": {
-    cloudCodeId: "gemini-3-flash-preview",
-    displayName: "Claude 4.5 Haiku (→ Gemini 3 Flash)",
+    cloudCodeId: "gemini-2.5-flash",
+    displayName: "Claude 4.5 Haiku (→ Gemini 2.5 Flash)",
     isThinking: false,
   },
   "claude-haiku-4-5-20251001": {
-    cloudCodeId: "gemini-3-flash-preview",
-    displayName: "Claude 4.5 Haiku (→ Gemini 3 Flash)",
+    cloudCodeId: "gemini-2.5-flash",
+    displayName: "Claude 4.5 Haiku (→ Gemini 2.5 Flash)",
     isThinking: false,
   },
   "claude-3-5-haiku-20241022": {
-    cloudCodeId: "gemini-3-flash-preview",
-    displayName: "Claude 3.5 Haiku (→ Gemini 3 Flash)",
+    cloudCodeId: "gemini-2.5-flash",
+    displayName: "Claude 3.5 Haiku (→ Gemini 2.5 Flash)",
     isThinking: false,
   },
 }
