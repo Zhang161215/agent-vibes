@@ -739,6 +739,18 @@ export class GoogleService {
     return entry.name
   }
 
+  /**
+   * Strip the "claude#" prefix from Anthropic thinking signatures.
+   * Google Cloud Code API expects pure Base64 in thought_signature,
+   * but Claude Code CLI sends signatures as "claude#<base64>".
+   */
+  private stripSignaturePrefix(sig: string): string {
+    if (sig.startsWith("claude#")) {
+      return sig.slice(7)
+    }
+    return sig
+  }
+
   private extractToolResultOutput(content: unknown): string {
     if (typeof content === "string") {
       return content
@@ -2236,7 +2248,7 @@ export class GoogleService {
 
         // Attach pending signature to text if no functionCall in message
         if (pendingThoughtSignature && !part.thoughtSignature) {
-          part.thoughtSignature = pendingThoughtSignature
+          part.thoughtSignature = this.stripSignaturePrefix(pendingThoughtSignature)
           pendingThoughtSignature = null
         }
 
@@ -2278,7 +2290,7 @@ export class GoogleService {
         }
 
         if (sig) {
-          fcPart.thoughtSignature = sig
+          fcPart.thoughtSignature = this.stripSignaturePrefix(sig)
         }
 
         if (typeof toolUseId === "string" && typeof b.name === "string") {
@@ -2360,7 +2372,7 @@ export class GoogleService {
         if (!p || typeof p !== "object" || p.thoughtSignature) continue
 
         if (p.functionCall) {
-          p.thoughtSignature = pendingThoughtSignature
+          p.thoughtSignature = this.stripSignaturePrefix(pendingThoughtSignature)
           pendingThoughtSignature = null
           break
         }
@@ -2370,7 +2382,7 @@ export class GoogleService {
           p.thought !== true &&
           p.text.length > 0
         ) {
-          p.thoughtSignature = pendingThoughtSignature
+          p.thoughtSignature = this.stripSignaturePrefix(pendingThoughtSignature)
           pendingThoughtSignature = null
           break
         }
@@ -2455,7 +2467,7 @@ export class GoogleService {
 
         // Attach pending signature to text if no functionCall in message
         if (pendingThoughtSignature && !part.thoughtSignature) {
-          part.thoughtSignature = pendingThoughtSignature
+          part.thoughtSignature = this.stripSignaturePrefix(pendingThoughtSignature)
           pendingThoughtSignature = null
         }
 
@@ -2493,7 +2505,7 @@ export class GoogleService {
         }
 
         if (sig) {
-          fcPart.thoughtSignature = sig
+          fcPart.thoughtSignature = this.stripSignaturePrefix(sig)
         }
 
         if (typeof toolUseId === "string" && typeof b.name === "string") {
@@ -2565,7 +2577,7 @@ export class GoogleService {
         if (!p || typeof p !== "object" || p.thoughtSignature) continue
 
         if (p.functionCall) {
-          p.thoughtSignature = pendingThoughtSignature
+          p.thoughtSignature = this.stripSignaturePrefix(pendingThoughtSignature)
           break
         }
 
@@ -2574,7 +2586,7 @@ export class GoogleService {
           p.thought !== true &&
           p.text.length > 0
         ) {
-          p.thoughtSignature = pendingThoughtSignature
+          p.thoughtSignature = this.stripSignaturePrefix(pendingThoughtSignature)
           break
         }
       }
