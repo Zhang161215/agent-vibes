@@ -1665,7 +1665,7 @@ export class GoogleService {
       this.logger.log(`Fuzzy opus match: ${model} -> claude-opus-4-6-thinking`)
       return "claude-opus-4-6-thinking"
     }
-    if (normalized.includes("sonnet") || normalized.includes("haiku")) {
+    if (normalized.includes("sonnet")) {
       this.logger.log(`Fuzzy match: ${model} -> ${DEFAULT_CLAUDE_MODEL}`)
       return DEFAULT_CLAUDE_MODEL
     }

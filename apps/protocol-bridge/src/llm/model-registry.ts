@@ -91,6 +91,28 @@ const GEMINI_MODELS: Record<
     displayName: "Gemini 2.5 Pro",
     isThinking: false,
   },
+  // Claude Haiku → Gemini Flash (haiku is used by Claude Code CLI for
+  // lightweight init/token-count requests; route to fast Gemini model)
+  "claude-haiku-4-5": {
+    cloudCodeId: "gemini-3-flash-preview",
+    displayName: "Claude 4.5 Haiku (→ Gemini 3 Flash)",
+    isThinking: false,
+  },
+  "claude-haiku-4.5": {
+    cloudCodeId: "gemini-3-flash-preview",
+    displayName: "Claude 4.5 Haiku (→ Gemini 3 Flash)",
+    isThinking: false,
+  },
+  "claude-haiku-4-5-20251001": {
+    cloudCodeId: "gemini-3-flash-preview",
+    displayName: "Claude 4.5 Haiku (→ Gemini 3 Flash)",
+    isThinking: false,
+  },
+  "claude-3-5-haiku-20241022": {
+    cloudCodeId: "gemini-3-flash-preview",
+    displayName: "Claude 3.5 Haiku (→ Gemini 3 Flash)",
+    isThinking: false,
+  },
 }
 
 // ---------------------------------------------------------------------------
@@ -262,26 +284,6 @@ const CLAUDE_MODELS: Record<
   "claude-3-7-sonnet-20250219": {
     cloudCodeId: "claude-sonnet-4-5",
     displayName: "Claude 3.7 Sonnet (→ Sonnet 4.5)",
-    isThinking: false,
-  },
-  "claude-haiku-4-5": {
-    cloudCodeId: "claude-sonnet-4-5",
-    displayName: "Claude 4.5 Haiku (→ Sonnet 4.5)",
-    isThinking: false,
-  },
-  "claude-haiku-4.5": {
-    cloudCodeId: "claude-sonnet-4-5",
-    displayName: "Claude 4.5 Haiku (→ Sonnet 4.5)",
-    isThinking: false,
-  },
-  "claude-haiku-4-5-20251001": {
-    cloudCodeId: "claude-sonnet-4-5",
-    displayName: "Claude 4.5 Haiku (→ Sonnet 4.5)",
-    isThinking: false,
-  },
-  "claude-3-5-haiku-20241022": {
-    cloudCodeId: "claude-sonnet-4-5",
-    displayName: "Claude 3.5 Haiku (→ Sonnet 4.5)",
     isThinking: false,
   },
 }
@@ -490,7 +492,7 @@ const CODEX_SHARED_MODEL_IDS = [
 export const DEFAULT_GEMINI_MODEL = "gemini-3.1-pro-high"
 
 /** Default Claude model when no mapping found */
-export const DEFAULT_CLAUDE_MODEL = "claude-sonnet-4-5"
+export const DEFAULT_CLAUDE_MODEL = "claude-opus-4-6-thinking"
 
 /** Default Codex model when no mapping found */
 export const DEFAULT_CODEX_MODEL = "o4-mini"
