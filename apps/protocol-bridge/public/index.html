@@ -518,6 +518,7 @@ function app(){return{
 
   settingGroups:[
     {title:'核心配置',keys:['PORT','PROXY_API_KEY','USE_HTTP2','LOG_DEBUG']},
+    {title:'限流与冷却',keys:['COOLDOWN_DEFAULT_MS','COOLDOWN_MAX_MS']},
     {title:'Antigravity 运行时',keys:['ANTIGRAVITY_NODE_BINARY','ANTIGRAVITY_NODE_MODULES','ANTIGRAVITY_APP_PATH']},
     {title:'Codex (OpenAI)',keys:['CODEX_API_KEY','CODEX_ACCESS_TOKEN','CODEX_BASE_URL','CODEX_PROXY_URL','CODEX_PLAN_TYPE','CODEX_USE_WEBSOCKET']},
     {title:'Cloud Code',keys:['CLOUD_CODE_DEFAULT_OUTPUT_TOKENS','CLOUD_CODE_MAX_OUTPUT_TOKENS','CLOUD_CODE_MIN_OUTPUT_TOKENS']},
@@ -603,7 +604,7 @@ function app(){return{
     try{const r=await this.api('PUT','/admin/settings',updates);this.showToast(r.message);await this.fetchSettings()}catch(e){this.showToast(e.message,'error')}
   },
 
-  getPlaceholder(k){return{PORT:'8000',PROXY_API_KEY:'sk-...',USE_HTTP2:'true',LOG_DEBUG:'false',ANTIGRAVITY_NODE_BINARY:'/usr/bin/node',ANTIGRAVITY_NODE_MODULES:'/opt/agent-vibes/node_modules',CODEX_PLAN_TYPE:'plus / pro / free',CODEX_USE_WEBSOCKET:'false'}[k]||''},
+  getPlaceholder(k){return{PORT:'8000',PROXY_API_KEY:'sk-...',USE_HTTP2:'true',LOG_DEBUG:'false',ANTIGRAVITY_NODE_BINARY:'/usr/bin/node',ANTIGRAVITY_NODE_MODULES:'/opt/agent-vibes/node_modules',CODEX_PLAN_TYPE:'plus / pro / free',CODEX_USE_WEBSOCKET:'false',COOLDOWN_DEFAULT_MS:'10000 (默认10秒)',COOLDOWN_MAX_MS:'30000 (最大30秒)'}[k]||''},
   fmtTime(ts){if(!ts)return'—';try{const d=new Date(ts);return d.toLocaleTimeString('zh-CN',{hour12:false})+' '+d.toLocaleDateString('zh-CN',{month:'short',day:'numeric'})}catch{return ts}},
   fmtCd(until){const r=Math.max(0,until-Date.now());if(r<=0)return'就绪';const m=Math.floor(r/60000),s=Math.floor((r%60000)/1000);return m>0?`${m}分${s}秒`:`${s}秒`},
   isExpired(t){if(!t)return false;return new Date(t)<new Date()},

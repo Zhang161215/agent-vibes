@@ -54,7 +54,8 @@ export class GoogleService {
   private readonly PRIME_RETRY_DELAYS = [2000, 3000, 5000] // ms between attempt retries
   private readonly BASE_RETRY_DELAY = 1200 // Base for 429 without retryDelay (ms)
   private readonly MAX_RETRY_DELAY = 60000 // Cap for exponential backoff (60s for rate limit recovery)
-  private readonly MAX_429_WAIT_MS = 5 * 60 * 1000 // Cap API retryMs (5 min), allow longer recovery
+  private MAX_429_WAIT_MS = 5 * 60 * 1000 // Cap API retryMs, configurable via COOLDOWN_MAX_MS
+  private COOLDOWN_DEFAULT_MS = 10_000 // Default cooldown when API doesn't return retryMs, configurable via COOLDOWN_DEFAULT_MS
   private readonly MAX_PROMPT_SHRINK_RETRIES: number = 3
   private readonly CLOUD_CODE_DEFAULT_OUTPUT_TOKENS: number = 65536
   private readonly CLOUD_CODE_MAX_OUTPUT_TOKENS: number = 65536
@@ -838,6 +839,23 @@ export class GoogleService {
         : unsigned
     this.sessionId = signed.toString()
     this.logger.log(`Session ID for Cloud Code requests: ${this.sessionId}`)
+
+    // Load cooldown configuration from environment
+    const maxCooldown = parseInt(
+      this.configService.get<string>("COOLDOWN_MAX_MS", "") || "", 10
+    )
+    const defaultCooldown = parseInt(
+      this.configService.get<string>("COOLDOWN_DEFAULT_MS", "") || "", 10
+    )
+    if (!isNaN(maxCooldown) && maxCooldown > 0) {
+      this.MAX_429_WAIT_MS = maxCooldown
+    }
+    if (!isNaN(defaultCooldown) && defaultCooldown > 0) {
+      this.COOLDOWN_DEFAULT_MS = defaultCooldown
+    }
+    this.logger.log(
+      `Cooldown config: max=${this.MAX_429_WAIT_MS}ms (${this.MAX_429_WAIT_MS / 1000}s), default=${this.COOLDOWN_DEFAULT_MS}ms (${this.COOLDOWN_DEFAULT_MS / 1000}s)`
+    )
   }
 
   /**
@@ -2963,7 +2981,7 @@ export class GoogleService {
           const cooldownMs =
             exhausted && retryMs !== null
               ? retryMs
-              : Math.min(retryMs ?? 60_000, this.MAX_429_WAIT_MS)
+              : Math.min(retryMs ?? this.COOLDOWN_DEFAULT_MS, this.MAX_429_WAIT_MS)
           this.processPool.setCooldown(cooldownMs, exhausted ? "配额耗尽 (QUOTA_EXHAUSTED)" : "请求限流 (RATE_LIMITED)")
 
           if (this.processPool.hasAvailableWorker()) {
@@ -3220,7 +3238,7 @@ export class GoogleService {
             const cooldownMs =
               exhausted && retryMs !== null
                 ? retryMs
-                : Math.min(retryMs ?? 60_000, self.MAX_429_WAIT_MS)
+                : Math.min(retryMs ?? self.COOLDOWN_DEFAULT_MS, self.MAX_429_WAIT_MS)
             self.processPool.setCooldown(cooldownMs, exhausted ? "配额耗尽 (QUOTA_EXHAUSTED)" : "请求限流 (RATE_LIMITED)")
 
             if (!isLast && self.processPool.hasAvailableWorker()) {

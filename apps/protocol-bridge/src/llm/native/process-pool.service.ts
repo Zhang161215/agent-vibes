@@ -225,7 +225,11 @@ export class ProcessPoolService implements OnModuleInit, OnModuleDestroy {
    * selected during rotation.
    */
   private async preflightQuotaCheck(): Promise<void> {
-    const PREFLIGHT_COOLDOWN_MS = 5 * 60_000 // 5 minutes
+    // Use configurable cooldown, default 30s (was hardcoded 5 min)
+    const envMs = parseInt(
+      this.configService.get<string>("COOLDOWN_MAX_MS", "") || "", 10
+    )
+    const PREFLIGHT_COOLDOWN_MS = !isNaN(envMs) && envMs > 0 ? envMs : 30_000
 
     const checks = this.workers
       .filter((w) => w.ready)
